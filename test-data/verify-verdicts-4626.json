@@ -1,0 +1,1490 @@
+{
+  "corruption/test_comp_corrupt/bti_partitions_footer_flip#audit-deep": {
+    "ok": false,
+    "findings": [
+      [
+        "BtiRootPointerCorrupt",
+        "Partitions.db"
+      ],
+      [
+        "BtiRootPointerCorrupt",
+        "Partitions.db"
+      ]
+    ],
+    "audit": [
+      [
+        "index-data-identity",
+        "Skip: not applicable: BTI format"
+      ],
+      [
+        "summary-index-correlation",
+        "Skip: not applicable: BTI format"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Fail"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "corruption/test_comp_corrupt/bti_partitions_footer_flip#full": {
+    "ok": false,
+    "findings": [
+      [
+        "BtiRootPointerCorrupt",
+        "Partitions.db"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/bti_partitions_footer_flip#quick": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/bti_rows_truncation#audit-deep": {
+    "ok": false,
+    "findings": [
+      [
+        "BtiRootPointerCorrupt",
+        "Partitions.db"
+      ],
+      [
+        "BtiTrieCorrupt",
+        "Rows.db"
+      ],
+      [
+        "BtiTrieCorrupt",
+        "Rows.db"
+      ]
+    ],
+    "audit": [
+      [
+        "index-data-identity",
+        "Skip: not applicable: BTI format"
+      ],
+      [
+        "summary-index-correlation",
+        "Skip: not applicable: BTI format"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Skip: boundary source unreadable"
+      ],
+      [
+        "bti-trie-bounds",
+        "Fail"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "corruption/test_comp_corrupt/bti_rows_truncation#full": {
+    "ok": false,
+    "findings": [
+      [
+        "BtiRootPointerCorrupt",
+        "Partitions.db"
+      ],
+      [
+        "BtiTrieCorrupt",
+        "Rows.db"
+      ],
+      [
+        "BtiTrieCorrupt",
+        "Rows.db"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/bti_rows_truncation#quick": {
+    "ok": false,
+    "findings": [
+      [
+        "BtiTrieCorrupt",
+        "Rows.db"
+      ],
+      [
+        "BtiTrieCorrupt",
+        "Rows.db"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/compression_info_bad_offset#audit-deep": {
+    "ok": false,
+    "findings": [
+      [
+        "CompressionInfoCorrupt",
+        "CompressionInfo.db"
+      ],
+      [
+        "UnsupportedCompressionFeature",
+        "Data.db"
+      ]
+    ],
+    "audit": [
+      [
+        "index-data-identity",
+        "Skip: boundary source unreadable: CompressionInfo.db unreadable; Data.db cannot be addressed"
+      ],
+      [
+        "summary-index-correlation",
+        "Pass"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Skip: not applicable: BIG format"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Fail"
+      ],
+      [
+        "statistics-vs-scan",
+        "Fail"
+      ]
+    ]
+  },
+  "corruption/test_comp_corrupt/compression_info_bad_offset#full": {
+    "ok": false,
+    "findings": [
+      [
+        "CompressionInfoCorrupt",
+        "CompressionInfo.db"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/compression_info_bad_offset#quick": {
+    "ok": false,
+    "findings": [
+      [
+        "CompressionInfoCorrupt",
+        "CompressionInfo.db"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/data_db_bit_flip#audit-deep": {
+    "ok": false,
+    "findings": [
+      [
+        "ChunkDecompressionError",
+        "Data.db"
+      ],
+      [
+        "DigestMismatch",
+        "Digest.crc32"
+      ],
+      [
+        "IndexPositionKeyMismatch",
+        "Index.db"
+      ]
+    ],
+    "audit": [
+      [
+        "index-data-identity",
+        "Fail"
+      ],
+      [
+        "summary-index-correlation",
+        "Pass"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Skip: not applicable: BIG format"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Fail"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Fail"
+      ]
+    ]
+  },
+  "corruption/test_comp_corrupt/data_db_bit_flip#full": {
+    "ok": false,
+    "findings": [
+      [
+        "ChunkDecompressionError",
+        "Data.db"
+      ],
+      [
+        "ChunkDecompressionError",
+        "Data.db"
+      ],
+      [
+        "DigestMismatch",
+        "Digest.crc32"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/data_db_bit_flip#quick": {
+    "ok": false,
+    "findings": [
+      [
+        "DigestMismatch",
+        "Digest.crc32"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/data_db_truncation#audit-deep": {
+    "ok": false,
+    "findings": [
+      [
+        "ChunkOffsetOutOfBounds",
+        "CompressionInfo.db"
+      ],
+      [
+        "ChunkOffsetOutOfBounds",
+        "CompressionInfo.db"
+      ],
+      [
+        "ChunkOffsetOutOfBounds",
+        "CompressionInfo.db"
+      ],
+      [
+        "ChunkOffsetOutOfBounds",
+        "CompressionInfo.db"
+      ],
+      [
+        "ChunkOffsetOutOfBounds",
+        "CompressionInfo.db"
+      ],
+      [
+        "DigestMismatch",
+        "Digest.crc32"
+      ],
+      [
+        "RowScanFailed",
+        "Data.db"
+      ]
+    ],
+    "audit": [
+      [
+        "index-data-identity",
+        "Skip: boundary source unreadable: CompressionInfo.db unreadable; Data.db cannot be addressed"
+      ],
+      [
+        "summary-index-correlation",
+        "Pass"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Skip: not applicable: BIG format"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Fail"
+      ],
+      [
+        "compression-coverage",
+        "Fail"
+      ],
+      [
+        "statistics-vs-scan",
+        "Fail"
+      ]
+    ]
+  },
+  "corruption/test_comp_corrupt/data_db_truncation#full": {
+    "ok": false,
+    "findings": [
+      [
+        "ChunkOffsetOutOfBounds",
+        "CompressionInfo.db"
+      ],
+      [
+        "ChunkOffsetOutOfBounds",
+        "CompressionInfo.db"
+      ],
+      [
+        "ChunkOffsetOutOfBounds",
+        "CompressionInfo.db"
+      ],
+      [
+        "ChunkOffsetOutOfBounds",
+        "CompressionInfo.db"
+      ],
+      [
+        "ChunkOffsetOutOfBounds",
+        "CompressionInfo.db"
+      ],
+      [
+        "DigestMismatch",
+        "Digest.crc32"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/data_db_truncation#quick": {
+    "ok": false,
+    "findings": [
+      [
+        "ChunkOffsetOutOfBounds",
+        "CompressionInfo.db"
+      ],
+      [
+        "ChunkOffsetOutOfBounds",
+        "CompressionInfo.db"
+      ],
+      [
+        "ChunkOffsetOutOfBounds",
+        "CompressionInfo.db"
+      ],
+      [
+        "ChunkOffsetOutOfBounds",
+        "CompressionInfo.db"
+      ],
+      [
+        "ChunkOffsetOutOfBounds",
+        "CompressionInfo.db"
+      ],
+      [
+        "DigestMismatch",
+        "Digest.crc32"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/digest_crc32_mismatch#audit-deep": {
+    "ok": false,
+    "findings": [
+      [
+        "DigestMismatch",
+        "Digest.crc32"
+      ]
+    ],
+    "audit": [
+      [
+        "index-data-identity",
+        "Pass"
+      ],
+      [
+        "summary-index-correlation",
+        "Pass"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Skip: not applicable: BIG format"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Fail"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "corruption/test_comp_corrupt/digest_crc32_mismatch#full": {
+    "ok": false,
+    "findings": [
+      [
+        "DigestMismatch",
+        "Digest.crc32"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/digest_crc32_mismatch#quick": {
+    "ok": false,
+    "findings": [
+      [
+        "DigestMismatch",
+        "Digest.crc32"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/filter_db_bit_flip#audit-deep": {
+    "ok": false,
+    "findings": [
+      [
+        "FilterFalseNegative",
+        "Filter.db"
+      ]
+    ],
+    "audit": [
+      [
+        "index-data-identity",
+        "Pass"
+      ],
+      [
+        "summary-index-correlation",
+        "Pass"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Fail"
+      ],
+      [
+        "bti-trie-bounds",
+        "Skip: not applicable: BIG format"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "corruption/test_comp_corrupt/filter_db_bit_flip#full": {
+    "ok": false,
+    "findings": [
+      [
+        "FilterFalseNegative",
+        "Filter.db"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/filter_db_bit_flip#quick": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/index_db_bit_flip_big#audit-deep": {
+    "ok": false,
+    "findings": [
+      [
+        "IndexEntryCorrupt",
+        "Index.db"
+      ]
+    ],
+    "audit": [
+      [
+        "index-data-identity",
+        "Skip: boundary source unreadable"
+      ],
+      [
+        "summary-index-correlation",
+        "Skip: boundary source unreadable"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Skip: boundary source unreadable"
+      ],
+      [
+        "bti-trie-bounds",
+        "Skip: not applicable: BIG format"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "corruption/test_comp_corrupt/index_db_bit_flip_big#full": {
+    "ok": false,
+    "findings": [
+      [
+        "IndexEntryCorrupt",
+        "Index.db"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/index_db_bit_flip_big#quick": {
+    "ok": false,
+    "findings": [
+      [
+        "IndexEntryCorrupt",
+        "Index.db"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/statistics_db_header_damage#audit-deep": {
+    "ok": false,
+    "findings": [
+      [
+        "RowScanFailed",
+        "Data.db"
+      ],
+      [
+        "StatisticsHeaderCorrupt",
+        "Statistics.db"
+      ]
+    ],
+    "audit": [
+      [
+        "index-data-identity",
+        "Pass"
+      ],
+      [
+        "summary-index-correlation",
+        "Pass"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Skip: not applicable: BIG format"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Fail"
+      ]
+    ]
+  },
+  "corruption/test_comp_corrupt/statistics_db_header_damage#full": {
+    "ok": false,
+    "findings": [
+      [
+        "RowScanFailed",
+        "Data.db"
+      ],
+      [
+        "StatisticsHeaderCorrupt",
+        "Statistics.db"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/statistics_db_header_damage#quick": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/summary_db_truncation#audit-deep": {
+    "ok": false,
+    "findings": [
+      [
+        "SummaryCorrupt",
+        "Summary.db"
+      ]
+    ],
+    "audit": [
+      [
+        "index-data-identity",
+        "Pass"
+      ],
+      [
+        "summary-index-correlation",
+        "Skip: Summary.db unreadable: Data corruption: Failed to parse Summary.db: Corruption(\"Summary.db too small: 16 bytes, need at least 24 for header\")"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Skip: not applicable: BIG format"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "corruption/test_comp_corrupt/summary_db_truncation#full": {
+    "ok": false,
+    "findings": [
+      [
+        "SummaryCorrupt",
+        "Summary.db"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/summary_db_truncation#quick": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/toc_missing_component#audit-deep": {
+    "ok": false,
+    "findings": [
+      [
+        "MissingComponent",
+        "Statistics.db"
+      ]
+    ],
+    "audit": [
+      [
+        "index-data-identity",
+        "Pass"
+      ],
+      [
+        "summary-index-correlation",
+        "Pass"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Skip: not applicable: BIG format"
+      ],
+      [
+        "toc-exact-listing",
+        "Fail"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "corruption/test_comp_corrupt/toc_missing_component#full": {
+    "ok": false,
+    "findings": [
+      [
+        "MissingComponent",
+        "Statistics.db"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/toc_missing_component#quick": {
+    "ok": false,
+    "findings": [
+      [
+        "MissingComponent",
+        "Statistics.db"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/uncompressed_data_bit_flip#audit-deep": {
+    "ok": false,
+    "findings": [
+      [
+        "ChunkDecompressionError",
+        "Data.db"
+      ],
+      [
+        "DigestMismatch",
+        "Digest.crc32"
+      ]
+    ],
+    "audit": [
+      [
+        "index-data-identity",
+        "Pass"
+      ],
+      [
+        "summary-index-correlation",
+        "Pass"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Skip: not applicable: BIG format"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Fail"
+      ],
+      [
+        "compression-coverage",
+        "Skip: no CompressionInfo: uncompressed"
+      ],
+      [
+        "statistics-vs-scan",
+        "Fail"
+      ]
+    ]
+  },
+  "corruption/test_comp_corrupt/uncompressed_data_bit_flip#full": {
+    "ok": false,
+    "findings": [
+      [
+        "ChunkDecompressionError",
+        "Data.db"
+      ],
+      [
+        "DigestMismatch",
+        "Digest.crc32"
+      ],
+      [
+        "UncompressedChunkCrcMismatch",
+        "Data.db"
+      ]
+    ],
+    "audit": []
+  },
+  "corruption/test_comp_corrupt/uncompressed_data_bit_flip#quick": {
+    "ok": false,
+    "findings": [
+      [
+        "DigestMismatch",
+        "Digest.crc32"
+      ]
+    ],
+    "audit": []
+  },
+  "sstables/test_comp/deflate_table-2592698071a911f19b3225f9984c6a77#audit-deep": {
+    "ok": true,
+    "findings": [],
+    "audit": [
+      [
+        "index-data-identity",
+        "Pass"
+      ],
+      [
+        "summary-index-correlation",
+        "Pass"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Skip: not applicable: BIG format"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "sstables/test_comp/deflate_table-2592698071a911f19b3225f9984c6a77#full": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_comp/deflate_table-2592698071a911f19b3225f9984c6a77#quick": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_comp/incompressible_uncompressed_chunk-25b8dd4071a911f19b3225f9984c6a77#audit-deep": {
+    "ok": true,
+    "findings": [],
+    "audit": [
+      [
+        "index-data-identity",
+        "Pass"
+      ],
+      [
+        "summary-index-correlation",
+        "Pass"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Skip: not applicable: BIG format"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "sstables/test_comp/incompressible_uncompressed_chunk-25b8dd4071a911f19b3225f9984c6a77#full": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_comp/incompressible_uncompressed_chunk-25b8dd4071a911f19b3225f9984c6a77#quick": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77#audit-deep": {
+    "ok": true,
+    "findings": [],
+    "audit": [
+      [
+        "index-data-identity",
+        "Pass"
+      ],
+      [
+        "summary-index-correlation",
+        "Pass"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Skip: not applicable: BIG format"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77#full": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77#quick": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_comp/short_final_chunk-25aef23071a911f19b3225f9984c6a77#audit-deep": {
+    "ok": true,
+    "findings": [],
+    "audit": [
+      [
+        "index-data-identity",
+        "Pass"
+      ],
+      [
+        "summary-index-correlation",
+        "Pass"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Skip: not applicable: BIG format"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "sstables/test_comp/short_final_chunk-25aef23071a911f19b3225f9984c6a77#full": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_comp/short_final_chunk-25aef23071a911f19b3225f9984c6a77#quick": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77#audit-deep": {
+    "ok": true,
+    "findings": [],
+    "audit": [
+      [
+        "index-data-identity",
+        "Pass"
+      ],
+      [
+        "summary-index-correlation",
+        "Pass"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Skip: not applicable: BIG format"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77#full": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77#quick": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_comp/uncompressed_table-25a5ca7071a911f19b3225f9984c6a77#audit-deep": {
+    "ok": true,
+    "findings": [],
+    "audit": [
+      [
+        "index-data-identity",
+        "Pass"
+      ],
+      [
+        "summary-index-correlation",
+        "Pass"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Skip: not applicable: BIG format"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Skip: no CompressionInfo: uncompressed"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "sstables/test_comp/uncompressed_table-25a5ca7071a911f19b3225f9984c6a77#full": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_comp/uncompressed_table-25a5ca7071a911f19b3225f9984c6a77#quick": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_comp/zstd_table-259ca2b071a911f19b3225f9984c6a77#audit-deep": {
+    "ok": true,
+    "findings": [],
+    "audit": [
+      [
+        "index-data-identity",
+        "Pass"
+      ],
+      [
+        "summary-index-correlation",
+        "Pass"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Skip: not applicable: BIG format"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "sstables/test_comp/zstd_table-259ca2b071a911f19b3225f9984c6a77#full": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_comp/zstd_table-259ca2b071a911f19b3225f9984c6a77#quick": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_da/collection_table-de2c155064e711f19ad401a8c8227b11#audit-deep": {
+    "ok": true,
+    "findings": [],
+    "audit": [
+      [
+        "index-data-identity",
+        "Skip: not applicable: BTI format"
+      ],
+      [
+        "summary-index-correlation",
+        "Skip: not applicable: BTI format"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Pass"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "sstables/test_da/collection_table-de2c155064e711f19ad401a8c8227b11#full": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_da/collection_table-de2c155064e711f19ad401a8c8227b11#quick": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_da/multiclustering_table-fd74ad508d2311f1a29b6d2c15dcffdf#audit-deep": {
+    "ok": true,
+    "findings": [],
+    "audit": [
+      [
+        "index-data-identity",
+        "Skip: not applicable: BTI format"
+      ],
+      [
+        "summary-index-correlation",
+        "Skip: not applicable: BTI format"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Pass"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "sstables/test_da/multiclustering_table-fd74ad508d2311f1a29b6d2c15dcffdf#full": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_da/multiclustering_table-fd74ad508d2311f1a29b6d2c15dcffdf#quick": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11#audit-deep": {
+    "ok": true,
+    "findings": [],
+    "audit": [
+      [
+        "index-data-identity",
+        "Skip: not applicable: BTI format"
+      ],
+      [
+        "summary-index-correlation",
+        "Skip: not applicable: BTI format"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Pass"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11#full": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11#quick": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_da/ttl_table-de3b579064e711f19ad401a8c8227b11#audit-deep": {
+    "ok": true,
+    "findings": [],
+    "audit": [
+      [
+        "index-data-identity",
+        "Skip: not applicable: BTI format"
+      ],
+      [
+        "summary-index-correlation",
+        "Skip: not applicable: BTI format"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Pass"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "sstables/test_da/ttl_table-de3b579064e711f19ad401a8c8227b11#full": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_da/ttl_table-de3b579064e711f19ad401a8c8227b11#quick": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_da/wide_multiclustering_small-47f6a3008f6911f1bc0f8df8badcc262#audit-deep": {
+    "ok": true,
+    "findings": [],
+    "audit": [
+      [
+        "index-data-identity",
+        "Skip: not applicable: BTI format"
+      ],
+      [
+        "summary-index-correlation",
+        "Skip: not applicable: BTI format"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Pass"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "sstables/test_da/wide_multiclustering_small-47f6a3008f6911f1bc0f8df8badcc262#full": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_da/wide_multiclustering_small-47f6a3008f6911f1bc0f8df8badcc262#quick": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_da/wide_table-9099a7c06c1811f19864870fb8444786#audit-deep": {
+    "ok": true,
+    "findings": [],
+    "audit": [
+      [
+        "index-data-identity",
+        "Skip: not applicable: BTI format"
+      ],
+      [
+        "summary-index-correlation",
+        "Skip: not applicable: BTI format"
+      ],
+      [
+        "bloom-no-false-negative",
+        "Pass"
+      ],
+      [
+        "bti-trie-bounds",
+        "Pass"
+      ],
+      [
+        "toc-exact-listing",
+        "Pass"
+      ],
+      [
+        "digest-matches-data",
+        "Pass"
+      ],
+      [
+        "compression-coverage",
+        "Pass"
+      ],
+      [
+        "statistics-vs-scan",
+        "Pass"
+      ]
+    ]
+  },
+  "sstables/test_da/wide_table-9099a7c06c1811f19864870fb8444786#full": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  },
+  "sstables/test_da/wide_table-9099a7c06c1811f19864870fb8444786#quick": {
+    "ok": true,
+    "findings": [],
+    "audit": []
+  }
+}

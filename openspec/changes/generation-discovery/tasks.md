@@ -89,7 +89,7 @@ exercises. Commit after each unit (#3042). Each migration PR deletes the copy it
 
 ## 6. verify (PR 6)
 
-- [ ] 6.1 `verify` resolves components and Statistics through the module; `verify-audit` GD11. Surface:
+- [x] 6.1 `verify` resolves components and Statistics through the module; `verify-audit` GD11. Surface:
       `cqlite verify` over the `sstable-verify-parity` fixtures; every verdict unchanged.
 - [ ] 6.2 Phase closing tasks.
 

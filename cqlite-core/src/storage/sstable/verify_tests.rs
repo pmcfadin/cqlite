@@ -11,6 +11,7 @@
 //! private items unchanged.
 
 use super::*;
+use crate::storage::sstable::reader::extract_sstable_base_name;
 use crate::storage::sstable::verify_order::{
     classify_clustering_row_order, classify_order_and_ldt,
 };
@@ -607,22 +608,39 @@ fn identity_check_detects_count_mismatch() {
     assert!(detail.contains("3 distinct partitions"));
 }
 
+/// List `dir` through the generation module and convert its one generation (live, else orphan).
+fn listed_component_set(dir: &Path) -> ComponentSet {
+    use crate::storage::sstable::generation::{list_generations, Scope, TocPolicy};
+    let listing = list_generations(dir, &Scope::Live, TocPolicy::Accept).expect("list");
+    let generation = listing
+        .live
+        .into_iter()
+        .chain(listing.orphans)
+        .next()
+        .expect("one generation");
+    ComponentSet::from_generation(generation)
+}
+
 // ---- Finding 1 (roborev round 2): tolerate reader filename shapes -------
 //
 // `SSTableReader::open` does not enforce a "-Data.db" suffix and still opens a
 // file whose name it cannot map (it just skips siblings). A reader that opened
 // MUST get an `IntegrityCheckResult` from `perform_integrity_check`, not an
-// `Err`, so `build_component_set` (the resolution the integrity check ultimately
-// drives) must never reject on the suffix.
+// `Err`, so exact-path resolution (`verify_resolve::resolve_exact`) must never
+// reject on the suffix, even though the generation module's listing does not
+// return such a name as a `Data.db` (issue #1283, restored for #4626).
+
+fn exact_set_for(name: &str) -> (tempfile::TempDir, PathBuf, ComponentSet) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = dir.path().join(name);
+    std::fs::write(&p, [1u8; 4]).expect("write");
+    let set = verify_resolve::resolve_exact(dir.path(), &p).expect("must resolve, not error");
+    (dir, p, set)
+}
 
 #[test]
 fn build_component_set_matches_reader_base_name_for_non_data_db_name() {
-    // A name that does NOT end in "-Data.db" but that the reader's own
-    // base-name derivation accepts must resolve to the SAME base name the
-    // reader uses for sibling lookup — never an Err (issue #1283, roborev).
-    let p = PathBuf::from("/dir/nb-7-big-Statistics.db");
-    let set = build_component_set(std::slice::from_ref(&p), p.clone())
-        .expect("reader-accepted non-Data.db name must not error");
+    let (_dir, p, set) = exact_set_for("nb-7-big-Statistics.db");
     assert_eq!(
         Some(set.base_name),
         extract_sstable_base_name(&p),
@@ -632,21 +650,80 @@ fn build_component_set_matches_reader_base_name_for_non_data_db_name() {
 
 #[test]
 fn build_component_set_degrades_on_unmappable_name() {
-    // A name the reader can open but that neither ends in "-Data.db" nor maps
-    // via the reader's derivation degrades to the filename minus ".db" (verify
-    // what we can) rather than erroring.
-    let p = PathBuf::from("/dir/weird.db");
-    let set = build_component_set(&[], p.clone()).expect("must degrade, not error");
+    let (_dir, p, set) = exact_set_for("weird.db");
     assert_eq!(set.base_name, "weird");
     assert_eq!(set.data_path, p);
 }
 
 #[test]
 fn build_component_set_standard_name_still_resolves_canonically() {
-    let p = PathBuf::from("/dir/nb-3-big-Data.db");
-    let set =
-        build_component_set(std::slice::from_ref(&p), p.clone()).expect("standard name resolves");
+    let (_dir, _p, set) = exact_set_for("nb-3-big-Data.db");
     assert_eq!(set.base_name, "nb-3-big");
+}
+
+/// A noncanonical name is still floor-checked from its parsed descriptor, and its Statistics
+/// goes through the module's trusted direct read (a garbage file is `Corrupt`, never skipped).
+#[test]
+fn noncanonical_exact_path_keeps_the_floor_and_the_integrity_check() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let below = dir.path().join("ma-7-big-Statistics.db");
+    std::fs::write(&below, [1u8; 4]).expect("write");
+    assert!(matches!(
+        verify_resolve::resolve_exact(dir.path(), &below),
+        Err(Error::UnsupportedVersion { .. })
+    ));
+
+    let (_dir, _p, set) = exact_set_for("nb-7-big-Statistics.db");
+    assert!(matches!(
+        set.statistics(),
+        Err(crate::storage::sstable::generation::MetadataFailure::Corrupt { .. })
+    ));
+}
+
+/// The exact-path (direct) Statistics read happens once per resolution: both callers (the
+/// Statistics check and the audit input) get the SAME `Arc`, so they cannot disagree.
+#[test]
+fn direct_statistics_are_read_once_per_resolution() {
+    let root = std::env::var("CQLITE_DATASETS_ROOT")
+        .ok()
+        .map(PathBuf::from);
+    let src = root.as_ref().and_then(|r| {
+        let ks = r.join("sstables/test_comp");
+        std::fs::read_dir(ks)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("lz4_table"))
+            })
+    });
+    let stats = src.and_then(|d| {
+        std::fs::read_dir(d)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().ends_with("-Statistics.db"))
+            })
+    });
+    let Some(stats) = stats else {
+        assert!(
+            std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref() != Ok("1"),
+            "lz4_table Statistics.db fixture absent under CQLITE_REQUIRE_FIXTURES=1"
+        );
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = dir.path().join("nb-7-big-Statistics.db");
+    std::fs::copy(&stats, &p).expect("copy");
+    let set = verify_resolve::resolve_exact(dir.path(), &p).expect("resolves");
+    let first = set.statistics().expect("fixture Statistics.db is trusted");
+    // Remove the file: a second READ would now fail, a cached value is returned unchanged.
+    std::fs::remove_file(&p).expect("remove");
+    let second = set.statistics().expect("cached, not re-read");
+    assert!(Arc::ptr_eq(&first, &second));
 }
 
 // ---- Finding 2 (roborev round 2): relative Data.db path, empty parent ---
@@ -680,7 +757,8 @@ fn generation_dir_normalizes_empty_parent_to_current_dir() {
 // I4 — a failed `Data.db` stat must be a typed finding, never a silent 0.
 //
 // Tested at this private seam because the public `verify_sstable` surface
-// cannot reach it: `read_dir_files` filters on `is_file()`, so a generation
+// cannot reach it: the module's listing reports a generation without a
+// `Data.db` as an Orphan that `resolve_*` refuses, so a generation
 // whose `Data.db` cannot be stat'ed never resolves at all and the function
 // returns `Err` before any check runs. The reachable production case is a
 // TOCTOU window — a concurrent compaction unlinking the generation between
@@ -699,14 +777,12 @@ fn component_set_with_unstattable_data_db(dir: &Path) -> ComponentSet {
     // must merely EXIST, or Check 5b takes its absent-CRC.db early return and
     // the case proves nothing.
     std::fs::write(&crc_path, [0u8; 8]).expect("write CRC.db stand-in");
-    let mut present = BTreeMap::new();
-    present.insert("CRC.db".to_string(), crc_path);
-    ComponentSet {
-        base_name,
-        format: SsTableFormat::Big,
-        present,
-        data_path: dir.join("nb-1-big-Data.db"), // deliberately absent
-    }
+    // No `Data.db`: the module lists the generation as an Orphan, which `from_generation` converts
+    // without refusing, so `data_path` is the deliberately absent `nb-1-big-Data.db`.
+    let set = listed_component_set(dir);
+    assert_eq!(set.base_name, base_name);
+    assert!(!set.data_path.exists());
+    set
 }
 
 #[tokio::test]
@@ -786,12 +862,10 @@ async fn i4_unstattable_data_db_is_a_typed_finding_not_a_zero_logical_length() {
 // ---------------------------------------------------------------------------
 
 fn bti_component_set(dir: &Path) -> ComponentSet {
-    ComponentSet {
-        base_name: "da-2-bti".to_string(),
-        format: SsTableFormat::Bti,
-        present: BTreeMap::new(),
-        data_path: dir.join("da-2-bti-Data.db"),
-    }
+    std::fs::write(dir.join("da-2-bti-Data.db"), [0u8; 1]).expect("write Data.db stand-in");
+    let set = listed_component_set(dir);
+    assert_eq!(set.format, SsTableFormat::Bti);
+    set
 }
 
 fn pending_at(finding_index: usize, logical_len: u64) -> PendingLocation {
