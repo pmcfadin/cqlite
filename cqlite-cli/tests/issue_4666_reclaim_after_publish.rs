@@ -244,6 +244,8 @@ fn out_published(out: &Path) -> Vec<PathBuf> {
 /// The core of the defect: a failure inside the publish window, AFTER compaction ran, must leave
 /// the fully-expired input (and the live one) intact. Aborts at `n = 0`: everything staged and
 /// fsynced, nothing renamed.
+// Depends on the debug-build `CQLITE_TEST_PUBLISH_ABORT` seam; a release build has no seam.
+#[cfg(debug_assertions)]
 #[test]
 fn publish_failure_keeps_fully_expired_input() {
     let (temp, input_dir, expired, live, schema) = stage();
@@ -269,6 +271,8 @@ fn publish_failure_keeps_fully_expired_input() {
 
 /// Crash AFTER the last link (n = file count) but before removal: inputs AND output exist
 /// (Cassandra's recoverable duplicate state), nothing lost.
+// Depends on the debug-build `CQLITE_TEST_PUBLISH_ABORT` seam; a release build has no seam.
+#[cfg(debug_assertions)]
 #[test]
 fn crash_after_publish_leaves_inputs_and_output() {
     let (temp, input_dir, expired, live, schema) = stage();
