@@ -198,7 +198,7 @@ mod packaged_binary {
                 "--schema",
                 schema.to_str().expect("utf8 path"),
             ],
-            "Failed to read input directory",
+            "cannot resolve compact inputs",
         );
     }
 }

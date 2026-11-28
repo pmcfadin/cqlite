@@ -86,7 +86,28 @@ pub fn copy_generation_as(src: &Path, from: &str, dst: &Path, to: &str) -> usize
     copied
 }
 
-/// `(relative path, size)` of every file below `dir`, sorted: a cheap byte-identity witness.
+/// `(relative path, full content)` of every file below `dir`, sorted: the byte-identity witness
+/// for "nothing was overwritten" (a size comparison cannot see an overwrite by a same-size file).
+pub fn content_signature(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for e in std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                walk(base, &p, out);
+            } else {
+                let rel = p.strip_prefix(base).unwrap().to_string_lossy().into_owned();
+                out.push((rel, std::fs::read(&p).unwrap()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+/// `(relative path, size)` of every file below `dir`, sorted: a cheap LISTING witness only. Use
+/// [`content_signature`] for any "unchanged" claim.
 pub fn tree_signature(dir: &Path) -> Vec<(String, u64)> {
     fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, u64)>) {
         for e in std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()) {

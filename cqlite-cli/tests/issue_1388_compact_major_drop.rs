@@ -114,7 +114,28 @@ fn flush_one(data_dir: &Path, sub: &str, muts: Vec<Mutation>) -> PathBuf {
     let r = rt();
     r.block_on(engine.flush()).expect("flush").expect("info");
     r.block_on(engine.close()).expect("close");
-    discover(&sub_dir).into_iter().next().expect("one Data.db")
+    let written = discover(&sub_dir).into_iter().next().expect("one Data.db");
+    relocate_flat(&written, data_dir)
+}
+
+/// `compact` reads ONE table directory (#4626, G8: no recursion), so move the flushed generation
+/// into `data_dir` itself under the next free sequence id (each flush wrote `nb-1-big-*`).
+fn relocate_flat(written: &Path, data_dir: &Path) -> PathBuf {
+    let taken = std::fs::read_dir(data_dir)
+        .expect("read data_dir")
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with("-big-Data.db"))
+        .count();
+    let n = taken + 1;
+    let src_dir = written.parent().expect("parent");
+    for entry in std::fs::read_dir(src_dir).expect("read stage").flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(rest) = name.strip_prefix("nb-1-big-") {
+            std::fs::rename(entry.path(), data_dir.join(format!("nb-{n}-big-{rest}")))
+                .expect("move component");
+        }
+    }
+    data_dir.join(format!("nb-{n}-big-Data.db"))
 }
 
 fn discover(dir: &Path) -> Vec<PathBuf> {
@@ -182,7 +203,7 @@ fn compact_major_drops_expired_sstable_and_names_it() {
         schema: schema_path,
         gc_before: Some(GC_BEFORE),
         now_sec: Some(NOW_SECS),
-        generation: 1,
+        generation: Some(1),
         major: true,
     };
 
@@ -231,7 +252,7 @@ fn compact_without_major_does_not_drop() {
         schema: schema_path,
         gc_before: Some(GC_BEFORE),
         now_sec: Some(NOW_SECS),
-        generation: 1,
+        generation: Some(1),
         major: false, // conservative: no drop (OQ-1 → (A))
     };
 
@@ -279,7 +300,7 @@ fn compact_major_all_expired_reports_and_reclaims_every_drop() {
         schema: schema_path,
         gc_before: Some(GC_BEFORE),
         now_sec: Some(NOW_SECS),
-        generation: 1,
+        generation: Some(1),
         major: true,
     };
 

@@ -47,6 +47,56 @@ pub fn next_generation_id(table_dir: &Path) -> GenerationResult<GenerationId> {
     next_sequence_after(highest).map(GenerationId::Sequence)
 }
 
+/// Refuse an explicitly requested sequence id that a writer cannot publish without overwriting
+/// (#4623): the id must be inside the Java `int` range (G7) and no descriptor in `table_dir`
+/// (Live, `backups/`, Orphan or hidden by a transaction log, any format, any version) may already
+/// use it, the same space `next_generation_id` allocates from (G6.2).
+///
+/// A `table_dir` that does not exist yet has nothing to collide with. This is a preflight: it
+/// reads the directory and writes nothing.
+pub fn ensure_sequence_id_free(table_dir: &Path, id: u64) -> GenerationResult<()> {
+    let requested = id;
+    let id = match u32::try_from(requested) {
+        Ok(v) if v <= MAX_SEQUENCE_ID => v,
+        _ => return Err(GenerationError::SequenceIdOutOfRange { requested }),
+    };
+    if !table_dir.is_dir() {
+        return Ok(());
+    }
+    let listing = list_generations(table_dir, &Scope::LiveAndBackups, TocPolicy::Accept)?;
+    let mut holders: Vec<String> = listing
+        .live
+        .iter()
+        .chain(listing.orphans.iter())
+        .filter(|g| g.id().sequence() == Some(id))
+        .map(|g| g.base_name())
+        .collect();
+    holders.extend(
+        listing
+            .hidden
+            .iter()
+            .filter(|h| {
+                h.path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(|n| n.split('-').nth(1))
+                    .and_then(GenerationId::parse)
+                    .and_then(|g| g.sequence())
+                    == Some(id)
+            })
+            .map(|h| h.path.display().to_string()),
+    );
+    if holders.is_empty() {
+        Ok(())
+    } else {
+        Err(GenerationError::IdInUse {
+            id,
+            directory: table_dir.to_path_buf(),
+            generations: holders,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

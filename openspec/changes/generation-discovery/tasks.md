@@ -41,19 +41,21 @@ exercises. Commit after each unit (#3042). Each migration PR deletes the copy it
 
 ## 2. Write engine and compact (PR 2; closes #4622 and #4623)
 
-- [ ] 2.1 Replace `WriteEngine::scan_generations` / `determine_next_generation`
+- [x] 2.1 Replace `WriteEngine::scan_generations` / `determine_next_generation`
       (`write_engine/mod.rs:1548`) with the module's next-id allocation. Surface: `WriteEngine::new` then a
       flush on a directory holding `oa-4-big`, `da-6-bti` and a UUID id (G6, G7).
-- [ ] 2.2 Replace `discover_input_sstables` / `collect_data_files`
+- [x] 2.2 Replace `discover_input_sstables` / `collect_data_files`
       (`cqlite-cli/src/commands/sstable_inputs.rs`) with the Live set; refuse a format or id form compact
       cannot handle by name; refuse a TocMissing generation by name (G3.2, G10). Surface: `cqlite compact`.
-- [ ] 2.3 `cqlite compact` never reads `snapshots/` or `backups/` (G8.1). Surface: the binary over a
+- [x] 2.3 `cqlite compact` never reads `snapshots/` or `backups/` (G8.1). Surface: the binary over a
       directory with both. Closes #4622.
-- [ ] 2.4 `compact --generation` defaults to the module's next id and never overwrites an existing name
+- [x] 2.4 `compact --generation` defaults to the module's next id and never overwrites an existing name
       (the #4623 overwrite hazard); publishing onto an existing name is refused. Surface: `cqlite compact
       --output <live table dir>`. Closes #4623.
-- [ ] 2.5 Delete the two replaced scanners; the `sweep.rs` and `info.rs` directory listings move to the
+- [x] 2.5 Delete the two replaced scanners; the `sweep.rs` and `info.rs` directory listings move to the
       module in this PR if they feed compact's inputs, otherwise in phase 3.
+      (Done: neither feeds compact's inputs, so `sweep.rs` and `info.rs` stay for phase 3; the two
+      replaced scanners are deleted.)
 - [ ] 2.6 Phase closing tasks.
 
 ## 3. explain, find, diagnose, diff (PR 3)

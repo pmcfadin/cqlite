@@ -547,7 +547,7 @@ pub struct MaintenanceArgs {
 // Arguments for the compact subcommand (Issue #842 — compaction parity harness)
 #[derive(Args, Debug, Clone)]
 pub struct CompactArgs {
-    /// Directory containing the input SSTables to compact (scanned for nb-*-big-Data.db)
+    /// Table directory of the input SSTables (live nb-*-big only; not recursive, no snapshots/backups)
     pub input_dir: PathBuf,
     /// Output directory for the compacted SSTable (keyspace/table/ is appended)
     #[arg(short, long)]
@@ -566,9 +566,9 @@ pub struct CompactArgs {
     /// default. (Carried but not yet consulted — see --gc-before note.)
     #[arg(long, value_name = "SECS")]
     pub now_sec: Option<i64>,
-    /// Output SSTable generation number (filename nb-<gen>-big-*.db)
-    #[arg(long, default_value = "1")]
-    pub generation: u64,
+    /// Output SSTable generation (nb-<gen>-big-*.db). Default: one above the highest generation id in <output>/<keyspace>/<table> (live and backups, any format; 1 if none). An id in use or outside 0..=2147483647 is refused before any write: compact never overwrites.
+    #[arg(long)]
+    pub generation: Option<u64>,
     /// Treat this as a MAJOR (full) compaction and PURGE gc-expired tombstones
     /// from the output. SAFETY CONTRACT: tombstone purging is only safe when the
     /// `<input-dir>` contains ALL overlapping SSTables for the table; otherwise a

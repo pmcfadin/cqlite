@@ -372,9 +372,10 @@ impl CompactResult {
 /// Handle the `compact` subcommand: one-shot, policy-free compaction of an
 /// explicit set of input SSTables into a single output SSTable (Issue #842).
 ///
-/// Reads the published `nb-*-big-Data.db` files under `args.input_dir`
-/// (newest-generation first, so the newest run wins last-write-wins ties),
-/// merges them, and writes the result under `args.output`.
+/// Reads the live `nb-*-big` generations of the ONE table directory `args.input_dir`
+/// (newest-generation first, so the newest run wins last-write-wins ties; see
+/// `sstable_inputs`), merges them, and publishes the result under `args.output`
+/// without ever overwriting an existing SSTable (#4623).
 ///
 /// `args.gc_before` / `args.now_sec` are threaded into the merge for
 /// deterministic purge decisions but are not yet applied (issues #845/#848).
@@ -409,7 +410,7 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
     let inputs = discover_input_sstables(&args.input_dir)?;
     if inputs.is_empty() {
         return Err(anyhow::anyhow!(
-            "No published SSTables (nb-*-big-Data.db with a sibling TOC.txt) found under {}",
+            "No live nb-*-big SSTables found in {} (compact reads one table directory and does not recurse)",
             args.input_dir.display()
         ));
     }
@@ -418,21 +419,18 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
     // explicit `--major` opt-in to `purge_safe`. Default (flag absent) is
     // conservative — see `compact_purge_safe`.
     let purge_safe = compact_purge_safe(args);
-    let report = cqlite_core::storage::write_engine::merge::compact_sstables_with_registry(
+
+    let (report, output_path) = crate::commands::compact_output::compact_and_publish(
         inputs,
-        &args.output,
+        args,
         &schema,
-        args.generation,
-        args.gc_before,
-        args.now_sec,
         purge_safe,
-        Some(&udt_registry),
+        &udt_registry,
     )
-    .await
-    .with_context(|| "compaction failed")?;
+    .await?;
 
     Ok(CompactResult {
-        output_path: report.output.data_path,
+        output_path,
         input_files: report.stats.input_files,
         output_partitions: report.stats.output_partitions,
         output_rows: report.stats.output_rows,

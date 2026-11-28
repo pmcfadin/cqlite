@@ -75,6 +75,11 @@ exclude = [
     # Resolves `test-data/fixtures/issue_4640b/` checkout-relative and fails closed (same class).
     "tests/issue_4640_udt_collections.rs",
     "tests/issue_4628_cross_generation_select.rs",
+    # Phase 2 of #4626 (and the phase-1 tests, same class): resolve `test-data/fixtures/issue_4626/`
+    # checkout-relative and fail closed.
+    "tests/generation_discovery.rs",
+    "tests/generation_txn.rs",
+    "tests/issue_4626_write_engine_ids.rs",
 ]
 
 # docs.rs build: document the commonly used features.
@@ -279,6 +284,12 @@ required-features = ["arrow"]
 # gated in its source.
 [[test]]
 name = "issue_3790_merged_read_time_order"
+required-features = ["write-support"]
+
+# Issue #4626 phase 2: the write engine's next-id allocation over Cassandra-written fixtures.
+[[test]]
+name = "issue_4626_write_engine_ids"
+path = "tests/issue_4626_write_engine_ids.rs"
 required-features = ["write-support"]
 
 # Issue #4628: SELECT vs live CL=ALL over the cross-generation tombstone fixture.
