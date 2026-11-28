@@ -39,10 +39,12 @@ pub(super) type MetadataCell = Arc<OnceLock<std::result::Result<Loaded, Metadata
 #[derive(Debug, Clone)]
 pub(super) struct Loaded {
     stats: Arc<SSTableStatistics>,
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
     facts: std::result::Result<Arc<StatisticsFacts>, String>,
 }
 
 /// STATS fields decoded once, inside the loader, from the same bytes as the typed value.
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 #[derive(Debug, Clone)]
 pub struct StatisticsFacts {
     pub(crate) repair: crate::parser::repair_metadata::RepairMetadata,
@@ -53,6 +55,7 @@ pub struct StatisticsFacts {
     pub(crate) minimums: Option<(i64, i64)>,
 }
 
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 fn decode_facts(
     bytes: &[u8],
     gates: &VersionGates,
@@ -161,6 +164,7 @@ impl Generation {
 
     /// The STATS fields `diagnose` reports beyond the typed value, from the same single read
     /// (G11, GD9). A decode failure is `Corrupt`, naming the file.
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
     pub fn statistics_facts(&self) -> std::result::Result<Arc<StatisticsFacts>, MetadataFailure> {
         self.statistics_facts_via(&read_checked)
     }
@@ -168,6 +172,7 @@ impl Generation {
     /// [`Generation::statistics_facts`] with the file read injected. Not part of the stable
     /// surface.
     #[doc(hidden)]
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
     pub fn statistics_facts_via(
         &self,
         read: &dyn Fn(&Path) -> Result<Vec<u8>>,
@@ -231,10 +236,12 @@ impl Generation {
         })?;
         let parsed = parse_statistics_with_fallback_detailed(&bytes, Some(&gates)).map(|(_, s)| s);
         // The facts are decoded from the same buffer; it is dropped when this function returns.
+        #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
         let facts = decode_facts(&bytes, &gates).map(Arc::new);
         match parsed {
             Ok(stats) => Ok(Loaded {
                 stats: Arc::new(stats),
+                #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
                 facts,
             }),
             Err(e) => Err(MetadataFailure::Corrupt {

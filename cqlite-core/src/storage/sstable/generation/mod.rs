@@ -32,7 +32,9 @@ pub use alloc::{ensure_sequence_id_free, next_generation_id, next_sequence_after
 pub use error::{GenerationError, GenerationResult};
 pub use id::{GenerationId, UuidGenerationId, MAX_SEQUENCE_ID};
 pub use listing::list_generations;
-pub use metadata::{MetadataFailure, StatisticsFacts};
+pub use metadata::MetadataFailure;
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub use metadata::StatisticsFacts;
 pub use model::{
     Component, Condition, DirectoryNote, Generation, HiddenBy, HiddenFile, Listing, Scope,
     TocPolicy,
