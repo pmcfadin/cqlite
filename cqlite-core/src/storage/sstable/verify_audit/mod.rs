@@ -24,11 +24,14 @@ mod index_checks;
 #[doc(hidden)]
 pub use data_view::take_header_bytes_requested;
 
+use crate::parser::statistics::SSTableStatistics;
+use crate::storage::sstable::generation::MetadataFailure;
 use crate::storage::sstable::verify::{
     BtiResolvedLeaf, CompressionState, VerifyErrorClass, VerifyFinding,
 };
 use crate::storage::sstable::version_gate::SsTableFormat;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Cause string shared with the #4194 location vocabulary.
 pub const BOUNDARY_SOURCE_UNREADABLE: &str = "boundary source unreadable";
@@ -142,7 +145,8 @@ pub(crate) struct AuditInputs<'a> {
     pub observed_partitions: Option<Result<usize, String>>,
     /// `--deep`: the BTI trie-vs-scan identity cross-check failed.
     pub bti_identity_failed: bool,
-    pub statistics_path: PathBuf,
+    /// The generation module's trusted `Statistics.db`, value or typed failure (one read).
+    pub statistics: Result<Arc<SSTableStatistics>, MetadataFailure>,
     pub platform: std::sync::Arc<crate::platform::Platform>,
 }
 
@@ -283,13 +287,11 @@ pub(crate) async fn run(input: AuditInputs<'_>, findings: &mut Vec<VerifyFinding
         findings,
     );
     let statistics = compression_stats::check_statistics_vs_scan(
-        &input.statistics_path,
+        &input.statistics,
         input.deep,
         input.observed_partitions.as_ref(),
-        &input.platform,
         findings,
-    )
-    .await;
+    );
 
     let verdicts = [
         identity,

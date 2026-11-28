@@ -41,13 +41,13 @@
 
 use crate::platform::Platform;
 use crate::storage::sstable::compression_info::CompressionInfo;
-use crate::storage::sstable::reader::{extract_sstable_base_name, SSTableReader};
+use crate::storage::sstable::reader::SSTableReader;
 use crate::storage::sstable::verify_audit::{self, AuditInputs, AuditSummary};
 use crate::storage::sstable::verify_location::{self, PendingLocation};
 use crate::storage::sstable::verify_order::check_key_order_and_ldt;
-use crate::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
+use crate::storage::sstable::verify_resolve;
+use crate::storage::sstable::version_gate::SsTableFormat;
 use crate::{Config, Error, Result};
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -347,33 +347,13 @@ impl VerifyReport {
     }
 }
 
-/// Resolved set of component files for one SSTable generation in a directory.
-/// `pub(crate)`: `verify_location::finalize_locations` reads `format`/`path()`.
-pub(crate) struct ComponentSet {
-    base_name: String,
-    pub(crate) format: SsTableFormat,
-    /// Map of bare component name (e.g. `Data.db`) -> absolute path on disk.
-    present: BTreeMap<String, PathBuf>,
-    data_path: PathBuf,
-}
-
-impl ComponentSet {
-    pub(crate) fn path(&self, dir: &Path, component: &str) -> PathBuf {
-        dir.join(format!("{}-{}", self.base_name, component))
-    }
-
-    /// `true` when a component (e.g. `Statistics.db`) is present on disk for
-    /// this SSTable generation, per the directory scan performed at resolution
-    /// time.
-    fn has(&self, component: &str) -> bool {
-        self.present.contains_key(component)
-    }
-}
+pub(crate) use crate::storage::sstable::verify_resolve::ComponentSet;
 
 /// Verify a single SSTable generation located in `dir`.
 ///
 /// `dir` must contain exactly one SSTable generation (i.e. one `*-Data.db`); if
-/// it contains several, the lexicographically-first generation is selected.
+/// it contains several, the first live generation in Cassandra's id order is selected (through the
+/// generation module; a below-floor generation is refused with `UnsupportedVersion`).
 ///
 /// Returns a [`VerifyReport`]. The function only returns `Err` for environmental
 /// problems (the directory cannot be read, or it contains no `Data.db`); *data*
@@ -385,7 +365,7 @@ pub async fn verify_sstable(
     config: &Config,
     platform: Arc<Platform>,
 ) -> Result<VerifyReport> {
-    let components = resolve_components(dir)?;
+    let components = verify_resolve::resolve_first_live(dir)?;
     verify_components(dir, components, mode, config, platform).await
 }
 
@@ -400,14 +380,14 @@ pub async fn verify_sstable_audit(
     config: &Config,
     platform: Arc<Platform>,
 ) -> Result<VerifyReport> {
-    let components = resolve_components(dir)?;
+    let components = verify_resolve::resolve_first_live(dir)?;
     verify_components_with(dir, components, VerifyMode::Audit, deep, config, platform).await
 }
 
 /// Verify the EXACT SSTable generation identified by `data_db_path`.
 ///
 /// Additive companion to [`verify_sstable`] (issue #1283, roborev). `verify_sstable`
-/// resolves the *lexicographically-first* `*-Data.db` in a directory, which is the
+/// resolves the first live generation (by id order) in a directory, which is the
 /// wrong generation when a directory holds several: an `SSTableReader` opened on
 /// generation N would otherwise report the integrity of whichever `Data.db` sorts
 /// first. This entry point verifies precisely the generation whose components share
@@ -424,7 +404,7 @@ pub async fn verify_sstable_generation(
     platform: Arc<Platform>,
 ) -> Result<VerifyReport> {
     let dir = generation_dir(data_db_path);
-    let components = resolve_components_for_data_path(dir, data_db_path)?;
+    let components = verify_resolve::resolve_exact(dir, data_db_path)?;
     verify_components(dir, components, mode, config, platform).await
 }
 
@@ -438,7 +418,7 @@ pub async fn verify_sstable_generation_audit(
     platform: Arc<Platform>,
 ) -> Result<VerifyReport> {
     let dir = generation_dir(data_db_path);
-    let components = resolve_components_for_data_path(dir, data_db_path)?;
+    let components = verify_resolve::resolve_exact(dir, data_db_path)?;
     verify_components_with(dir, components, VerifyMode::Audit, deep, config, platform).await
 }
 
@@ -579,7 +559,7 @@ async fn verify_components_with(
         }
 
         // ---- Check 6a: Statistics.db parse ---------------------------------
-        check_statistics(dir, &components, platform.clone(), &mut findings).await;
+        check_statistics(&components, &mut findings);
 
         // ---- Check 6b: Summary.db parse (BIG only) -------------------------
         if components.format == SsTableFormat::Big {
@@ -780,7 +760,7 @@ async fn run_audit(
     if components.format == SsTableFormat::Big {
         check_summary(dir, components, platform.clone(), findings).await;
     }
-    check_statistics(dir, components, platform.clone(), findings).await;
+    check_statistics(components, findings);
     let mut observed = None;
     let mut rows = None;
     let mut bti_identity_failed = false;
@@ -816,7 +796,7 @@ async fn run_audit(
         summary_path: components.path(dir, "Summary.db"),
         filter_path: components.path(dir, "Filter.db"),
         digest_path: components.path(dir, "Digest.crc32"),
-        statistics_path: components.path(dir, "Statistics.db"),
+        statistics: components.statistics(),
         deep,
         compression,
         bti_leaves,
@@ -829,121 +809,6 @@ async fn run_audit(
         platform,
     };
     (verify_audit::run(input, findings).await, rows)
-}
-
-/// Read all regular files in `dir`, returning `(all_files, data_files)` where
-/// `data_files` is the subset ending in `-Data.db`.
-fn read_dir_files(dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
-    let entries = std::fs::read_dir(dir).map_err(|e| {
-        Error::invalid_path(format!("Cannot read SSTable dir {}: {}", dir.display(), e))
-    })?;
-
-    let mut data_files: Vec<PathBuf> = Vec::new();
-    let mut all_files: Vec<PathBuf> = Vec::new();
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if !p.is_file() {
-            continue;
-        }
-        all_files.push(p.clone());
-        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-            if name.ends_with("-Data.db") {
-                data_files.push(p);
-            }
-        }
-    }
-    Ok((all_files, data_files))
-}
-
-/// Locate the SSTable generation in `dir` and enumerate its on-disk components.
-///
-/// If `dir` contains several generations, the lexicographically-first `*-Data.db`
-/// is selected (documented behavior of [`verify_sstable`]). To verify a SPECIFIC
-/// generation, use [`resolve_components_for_data_path`] / [`verify_sstable_generation`].
-fn resolve_components(dir: &Path) -> Result<ComponentSet> {
-    let (all_files, mut data_files) = read_dir_files(dir)?;
-
-    data_files.sort();
-    let data_path = data_files.into_iter().next().ok_or_else(|| {
-        Error::not_found(format!(
-            "No *-Data.db component found in SSTable directory {}",
-            dir.display()
-        ))
-    })?;
-
-    build_component_set(&all_files, data_path)
-}
-
-/// Enumerate the components for the EXACT generation identified by `data_path`
-/// within `dir`. Unlike [`resolve_components`], this does not pick the first-sorted
-/// generation; it uses precisely the caller-supplied `data_path` (issue #1283).
-fn resolve_components_for_data_path(dir: &Path, data_path: &Path) -> Result<ComponentSet> {
-    if !data_path.is_file() {
-        return Err(Error::not_found(format!(
-            "SSTable Data.db component not found at {}",
-            data_path.display()
-        )));
-    }
-    let (all_files, _data_files) = read_dir_files(dir)?;
-    build_component_set(&all_files, data_path.to_path_buf())
-}
-
-/// Build a [`ComponentSet`] for `data_path`, indexing the sibling components in
-/// `all_files` that share its base name.
-fn build_component_set(all_files: &[PathBuf], data_path: PathBuf) -> Result<ComponentSet> {
-    let data_name = data_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| Error::invalid_path("Data.db filename is not valid UTF-8"))?;
-    // Derive the base name with the SAME tolerance as `SSTableReader::open`, which
-    // locates its sibling components via `extract_sstable_base_name` and still opens
-    // a file whose name it cannot map (it simply skips the siblings). A reader that
-    // opened successfully MUST get an `IntegrityCheckResult`, not an `Err`, so this
-    // never rejects on the "-Data.db" suffix (issue #1283, roborev):
-    //   1. standard names end in "-Data.db" -> strip it (e.g. "nb-1-big");
-    //   2. otherwise fall back to the reader's own base-name derivation (descriptor
-    //      parse, then the {prefix}-{gen}-{format} heuristic) so any non-standard
-    //      name the reader accepts resolves the same base here;
-    //   3. if even that cannot map the name, degrade to the filename minus its ".db"
-    //      extension so we still verify what we can (Data.db digest, chunk CRCs)
-    //      rather than erroring — matching reader-open tolerance.
-    let base_name = data_name
-        .strip_suffix("-Data.db")
-        .map(str::to_string)
-        .or_else(|| extract_sstable_base_name(&data_path))
-        .unwrap_or_else(|| {
-            data_name
-                .strip_suffix(".db")
-                .unwrap_or(data_name)
-                .to_string()
-        });
-
-    // Detect format via the descriptor parser, which scans for the "big"/"bti"
-    // segment correctly even when the SSTable id is a hyphenated UUID
-    // (e.g. "da-00000000-0000-0000-0000-000000000001-bti-Data.db"). A fixed
-    // dash-index split would misread those as BIG and verify the wrong
-    // components (roborev).
-    let format = SsTableDescriptor::parse_filename(data_name)
-        .map(|d| d.format)
-        .unwrap_or(SsTableFormat::Big);
-
-    // Index present components for this base name only.
-    let prefix = format!("{}-", base_name);
-    let mut present = BTreeMap::new();
-    for p in all_files {
-        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-            if let Some(component) = name.strip_prefix(&prefix) {
-                present.insert(component.to_string(), p.clone());
-            }
-        }
-    }
-
-    Ok(ComponentSet {
-        base_name,
-        format,
-        present,
-        data_path,
-    })
 }
 
 /// `true` when `component` is a real Cassandra SSTable component name (the set
@@ -977,7 +842,7 @@ fn check_toc_and_presence(
     }
 
     let toc_path = components.path(dir, "TOC.txt");
-    if !toc_path.exists() {
+    if components.toc_missing {
         // No TOC at all: not a hard error here (some tooling omits it), but
         // record it as a missing component so it is visible.
         findings.push(VerifyFinding::new(
@@ -2017,71 +1882,26 @@ async fn check_uncompressed_crc_db(
     }
 }
 
-/// Check 6 (FULL): `Statistics.db` parses. Records a finding on failure but
-/// never aborts the rest of verification.
-async fn check_statistics(
-    dir: &Path,
-    components: &ComponentSet,
-    platform: Arc<Platform>,
-    findings: &mut Vec<VerifyFinding>,
-) {
-    use crate::storage::sstable::statistics_reader::StatisticsReader;
+/// Check 6 (FULL): `Statistics.db` is trustworthy. The generation module's trusted-metadata
+/// accessor does the one read (bounded, strict layout and checksum check, single parse, cached);
+/// `Corrupt` and `Unreadable` are the Statistics integrity finding. Records a finding on failure
+/// but never aborts the rest of verification.
+fn check_statistics(components: &ComponentSet, findings: &mut Vec<VerifyFinding>) {
+    use crate::storage::sstable::generation::MetadataFailure;
 
-    let stats_path = components.path(dir, "Statistics.db");
-    if !stats_path.exists() {
-        return; // absence already covered by the TOC check if listed
-    }
-
-    // Direct TOC-header sanity check FIRST. Cassandra's `MetadataSerializer`
-    // writes Statistics.db as: [u32 BE num_components][u32 BE checksum][TOC...].
-    // The production `StatisticsReader` is intentionally lenient (it falls back
-    // through several parsers and can silently accept a damaged header), so we
-    // validate the authoritative component count here. Cassandra only ever
-    // emits 4 metadata components (VALIDATION/COMPACTION/STATS/HEADER); a count
-    // outside [1,100] means the header is corrupt (e.g. the high byte flipped
-    // to 0xFF -> ~4.28e9 components).
-    match super::statistics_reader::integrity::read_bounded_statistics(&stats_path) {
-        Ok(bytes) if bytes.len() >= 8 => {
-            let num_components = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            if num_components == 0 || num_components > 100 {
-                findings.push(VerifyFinding::new(
-                    VerifyErrorClass::StatisticsHeaderCorrupt,
-                    "Statistics.db",
-                    format!(
-                        "Statistics.db TOC header is corrupt: num_components={} at byte 0 (expected 1..=100; first 4 bytes {:02x} {:02x} {:02x} {:02x})",
-                        num_components, bytes[0], bytes[1], bytes[2], bytes[3]
-                    ),
-                ));
-                return;
-            }
-        }
-        Ok(bytes) => {
+    match components.statistics() {
+        Ok(_) => {}
+        // Absence is covered by the TOC check when `TOC.txt` lists it.
+        Err(MetadataFailure::Absent { .. }) => {}
+        // The floor refusal happens at resolution, before any check runs.
+        Err(MetadataFailure::UnsupportedVersion { .. }) => {}
+        Err(failure @ (MetadataFailure::Corrupt { .. } | MetadataFailure::Unreadable { .. })) => {
             findings.push(VerifyFinding::new(
                 VerifyErrorClass::StatisticsHeaderCorrupt,
                 "Statistics.db",
-                format!(
-                    "Statistics.db is {} bytes — too small for the 8-byte TOC header",
-                    bytes.len()
-                ),
+                failure.to_string(),
             ));
-            return;
         }
-        Err(e) => {
-            findings.push(VerifyFinding::new(
-                VerifyErrorClass::StatisticsHeaderCorrupt,
-                "Statistics.db",
-                format!("cannot read Statistics.db: {}", e),
-            ));
-            return;
-        }
-    }
-
-    if let Err(e) = StatisticsReader::open(&stats_path, platform).await {
-        findings.push(VerifyFinding::new(
-            VerifyErrorClass::StatisticsHeaderCorrupt,
-            "Statistics.db",
-            format!("Statistics.db failed to parse: {}", e),
-        ));
     }
 }
 

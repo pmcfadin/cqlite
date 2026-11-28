@@ -89,13 +89,13 @@ exercises. Commit after each unit (#3042). Each migration PR deletes the copy it
 
 ## 6. verify (PR 6)
 
-- [ ] 6.1 `verify` resolves components and Statistics through the module; `verify-audit` GD11. Surface:
+- [x] 6.1 `verify` resolves components and Statistics through the module; `verify-audit` GD11. Surface:
       `cqlite verify` over the `sstable-verify-parity` fixtures; every verdict unchanged.
 - [ ] 6.2 Phase closing tasks.
 
 ## 7. Done
 
-- [ ] 7.1 A grep proves no discovery or raw Statistics.db read survives outside the module:
+- [x] 7.1 A grep proves no discovery or raw Statistics.db read survives outside the module:
       `read_dir`-based generation scans, `starts_with("nb-")` filename filters, `Statistics.db` opens, and
       `StatisticsReader` lenient parses, across `cqlite-core/src`, `cqlite-cli/src`, `bindings/` and
       `tools/`. Record the command and its empty output in the final PR.

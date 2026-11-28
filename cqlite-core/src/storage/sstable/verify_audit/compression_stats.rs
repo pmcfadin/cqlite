@@ -2,9 +2,9 @@
 //! invariant 8 (`Statistics.db` agrees with a real scan; `--deep` only).
 
 use super::{skip, AuditVerdict};
-use crate::platform::Platform;
+use crate::parser::statistics::SSTableStatistics;
 use crate::storage::sstable::chunk_decompressor::ChunkDecompressor;
-use crate::storage::sstable::statistics_reader::StatisticsReader;
+use crate::storage::sstable::generation::MetadataFailure;
 use crate::storage::sstable::verify::{CompressionState, VerifyErrorClass, VerifyFinding};
 use crate::storage::sstable::version_gate::SsTableFormat;
 use std::path::Path;
@@ -163,18 +163,14 @@ pub(super) fn check_compression_coverage(
 /// A declared `0` is not distinguishable from "not decodable" in the parser's
 /// contract, so it is unmeasured, never compared. The timestamp / local-deletion
 /// half is a DECLARED GAP (see `specs/verify-audit/spec.md` A8).
-pub(super) async fn check_statistics_vs_scan(
-    stats_path: &Path,
+pub(super) fn check_statistics_vs_scan(
+    statistics: &Result<Arc<SSTableStatistics>, MetadataFailure>,
     deep: bool,
     observed: Option<&Result<usize, String>>,
-    platform: &Arc<Platform>,
     findings: &mut Vec<VerifyFinding>,
 ) -> AuditVerdict {
     if !deep {
         return skip("requires --deep");
-    }
-    if !stats_path.exists() {
-        return skip("no Statistics.db");
     }
     let observed = match observed {
         Some(Ok(n)) => *n as u64,
@@ -184,8 +180,9 @@ pub(super) async fn check_statistics_vs_scan(
         Some(Err(_)) => return AuditVerdict::Fail,
         None => return skip("no scan result"),
     };
-    let declared = match StatisticsReader::open(stats_path, platform.clone()).await {
-        Ok(r) => r.statistics().row_stats.partition_count,
+    let declared = match statistics {
+        Ok(stats) => stats.row_stats.partition_count,
+        Err(MetadataFailure::Absent { .. }) => return skip("no Statistics.db"),
         Err(e) => return skip(format!("Statistics.db unreadable: {e}")),
     };
     if declared == 0 {

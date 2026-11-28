@@ -21,10 +21,15 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const ORACLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../test-data/verify-verdicts-4626.json");
+const ORACLE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../test-data/verify-verdicts-4626.json"
+);
 
 fn datasets_root() -> Option<PathBuf> {
-    std::env::var("CQLITE_DATASETS_ROOT").ok().map(PathBuf::from)
+    std::env::var("CQLITE_DATASETS_ROOT")
+        .ok()
+        .map(PathBuf::from)
 }
 
 fn strict() -> bool {
@@ -146,7 +151,11 @@ async fn verdicts_equal_the_pre_migration_capture() {
             failures.push(format!("{case}: not in the oracle"));
         }
     }
-    assert!(failures.is_empty(), "verdict changes:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "verdict changes:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// GD11.2: below-floor is a refusal naming the floor and opening no component.
@@ -155,7 +164,13 @@ async fn below_floor_generation_is_refused_without_opening_a_component() {
     let tmp = tempfile::tempdir().expect("tempdir");
     // Every component exists but is mode 000: opening any of them would fail with an I/O error,
     // so a refusal that is `UnsupportedVersion` proves none was opened. (Listing reads names only.)
-    for c in ["Data.db", "Statistics.db", "TOC.txt", "Digest.crc32", "Index.db"] {
+    for c in [
+        "Data.db",
+        "Statistics.db",
+        "TOC.txt",
+        "Digest.crc32",
+        "Index.db",
+    ] {
         let p = tmp.path().join(format!("ma-1-big-{c}"));
         std::fs::write(&p, b"x").expect("write");
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).expect("chmod");
@@ -176,7 +191,87 @@ async fn below_floor_generation_is_refused_without_opening_a_component() {
                 assert_eq!(version, "ma");
                 assert_eq!(floor, "na", "the refusal must name the floor");
             }
-            other => panic!("expected UnsupportedVersion, got {:?}", other.map(|r| r.findings)),
+            other => panic!(
+                "expected UnsupportedVersion, got {:?}",
+                other.map(|r| r.findings)
+            ),
         }
+    }
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("mkdir");
+    for e in std::fs::read_dir(from).expect("read_dir").flatten() {
+        if e.path().is_file() {
+            std::fs::copy(e.path(), to.join(e.file_name())).expect("copy");
+        }
+    }
+}
+
+/// GD11 mapping: `TocMissing` is the existing missing-`TOC.txt` finding, nothing else.
+#[tokio::test]
+async fn toc_missing_is_the_existing_missing_toc_finding() {
+    let Some(root) = datasets_root() else {
+        if strict() {
+            panic!("CQLITE_REQUIRE_FIXTURES=1 but CQLITE_DATASETS_ROOT is not set");
+        }
+        return;
+    };
+    let src = sorted_subdirs(&root.join("sstables/test_comp"))
+        .into_iter()
+        .find(|n| n.starts_with("lz4_table"))
+        .map(|n| root.join("sstables/test_comp").join(n));
+    let Some(src) = src.filter(|d| has_data_db(d)) else {
+        assert!(
+            !strict(),
+            "lz4_table fixture absent under CQLITE_REQUIRE_FIXTURES=1"
+        );
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    copy_dir(&src, tmp.path());
+    let toc = std::fs::read_dir(tmp.path())
+        .expect("read_dir")
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().ends_with("-TOC.txt"))
+        .expect("TOC.txt in the copy");
+    std::fs::remove_file(toc.path()).expect("remove TOC");
+    let got = run_case(tmp.path(), "full").await.expect("verdict");
+    assert!(!got.ok);
+    assert_eq!(
+        got.findings,
+        vec![("MissingComponent".to_string(), "TOC.txt".to_string())]
+    );
+}
+
+/// An Orphan (empty `Data.db`) is reported by name, never verified as live; and a directory input
+/// is Scope Live, so a generation only under `snapshots/<tag>/` is not found.
+#[tokio::test]
+async fn orphans_are_reported_and_snapshots_are_not_entered() {
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+
+    let orphan = tempfile::tempdir().expect("tempdir");
+    std::fs::write(orphan.path().join("nb-1-big-Data.db"), b"").expect("write");
+    match verify_sstable(orphan.path(), VerifyMode::Quick, &config, platform.clone()).await {
+        Err(Error::NotFound(msg)) => {
+            assert!(msg.contains("orphan") && msg.contains("nb-1-big"), "{msg}")
+        }
+        other => panic!(
+            "expected NotFound naming the orphan, got {:?}",
+            other.map(|r| r.findings)
+        ),
+    }
+
+    let snap = tempfile::tempdir().expect("tempdir");
+    let tag = snap.path().join("snapshots/t1");
+    std::fs::create_dir_all(&tag).expect("mkdir");
+    std::fs::write(tag.join("nb-1-big-Data.db"), b"data").expect("write");
+    match verify_sstable(snap.path(), VerifyMode::Quick, &config, platform).await {
+        Err(Error::NotFound(_)) => {}
+        other => panic!(
+            "snapshots/ must not be entered, got {:?}",
+            other.map(|r| r.findings)
+        ),
     }
 }

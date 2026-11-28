@@ -1,0 +1,149 @@
+//! Component resolution for the verifier, through the generation module (issue #4626, GD11).
+//!
+//! `verify` used to scan the directory itself, pick the lexicographically first `Data.db`, fall back
+//! to filename heuristics when the descriptor did not parse and default to BIG. All of that is the
+//! generation module's job now: this file lists the directory (Scope `Live`, which never enters
+//! `snapshots/` or `backups/`), selects the generation and turns the module's typed outcomes into
+//! the verifier's existing behaviour. It classifies nothing itself:
+//!
+//! - below the version floor: a refusal naming the floor, before any component is opened (GD11.2);
+//! - `TocMissing`: the existing missing-`TOC.txt` finding, raised by `check_toc_and_presence`;
+//! - `Corrupt` Statistics: the existing Statistics integrity finding, raised by `check_statistics`;
+//! - `Orphan`: reported by name, never verified as live.
+
+use crate::parser::statistics::SSTableStatistics;
+use crate::storage::sstable::generation::{
+    list_generations, Condition, Generation, Listing, MetadataFailure, Scope, TocPolicy,
+};
+use crate::storage::sstable::version_gate::SsTableFormat;
+use crate::{Error, Result};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+const DATA_COMPONENT: &str = "Data.db";
+
+/// Resolved set of component files for one SSTable generation in a directory.
+/// `pub(crate)`: `verify_location::finalize_locations` reads `format`/`path()`.
+pub(crate) struct ComponentSet {
+    pub(crate) base_name: String,
+    pub(crate) format: SsTableFormat,
+    /// Map of bare component name (e.g. `Data.db`) -> absolute path on disk.
+    pub(crate) present: BTreeMap<String, PathBuf>,
+    pub(crate) data_path: PathBuf,
+    /// The module's `TocMissing` condition: `Data.db` present, `TOC.txt` absent.
+    pub(crate) toc_missing: bool,
+    generation: Generation,
+}
+
+impl ComponentSet {
+    /// Convert a listed generation. No refusal happens here; [`resolve_first_live`] and
+    /// [`resolve_exact`] decide what may be verified.
+    pub(crate) fn from_generation(generation: Generation) -> Self {
+        let base_name = generation.base_name();
+        let present = generation
+            .components()
+            .iter()
+            .map(|c| (c.name.clone(), c.path.clone()))
+            .collect();
+        let data_path = generation
+            .component_path(DATA_COMPONENT)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| {
+                generation
+                    .directory()
+                    .join(format!("{base_name}-{DATA_COMPONENT}"))
+            });
+        Self {
+            base_name,
+            format: generation.format(),
+            present,
+            data_path,
+            toc_missing: generation.has_condition(Condition::TocMissing),
+            generation,
+        }
+    }
+
+    pub(crate) fn path(&self, dir: &Path, component: &str) -> PathBuf {
+        dir.join(format!("{}-{}", self.base_name, component))
+    }
+
+    /// `true` when a component (e.g. `Statistics.db`) is present on disk for this generation, per
+    /// the listing taken at resolution time.
+    pub(crate) fn has(&self, component: &str) -> bool {
+        self.present.contains_key(component)
+    }
+
+    /// The generation's `Statistics.db` through the module's one trusted-metadata accessor: read
+    /// once, cached, value or typed failure.
+    pub(crate) fn statistics(
+        &self,
+    ) -> std::result::Result<Arc<SSTableStatistics>, MetadataFailure> {
+        self.generation.trusted_metadata()
+    }
+}
+
+fn list_live(dir: &Path) -> Result<Listing> {
+    list_generations(dir, &Scope::Live, TocPolicy::Accept).map_err(|e| {
+        Error::invalid_path(format!("Cannot list SSTable dir {}: {}", dir.display(), e))
+    })
+}
+
+/// The floor refusal (GD11.2), from the descriptor alone: no component has been opened.
+fn refuse_below_floor(generation: &Generation) -> Result<()> {
+    match generation.below_floor() {
+        Some(below) => Err(Error::UnsupportedVersion {
+            version: below.version.clone(),
+            floor: below.floor.to_string(),
+        }),
+        None => Ok(()),
+    }
+}
+
+fn refuse_orphan(generation: &Generation) -> Error {
+    Error::not_found(format!(
+        "{} in {} is an orphan (Data.db missing or empty), not a live SSTable",
+        generation.base_name(),
+        generation.directory().display()
+    ))
+}
+
+/// The first live generation of `dir`, by Cassandra's id order. A directory input is Scope `Live`.
+pub(crate) fn resolve_first_live(dir: &Path) -> Result<ComponentSet> {
+    let listing = list_live(dir)?;
+    let Some(generation) = listing.live.first() else {
+        return Err(match listing.orphans.first() {
+            Some(orphan) => refuse_orphan(orphan),
+            None => Error::not_found(format!(
+                "No *-Data.db component found in SSTable directory {}",
+                dir.display()
+            )),
+        });
+    };
+    refuse_below_floor(generation)?;
+    Ok(ComponentSet::from_generation(generation.clone()))
+}
+
+/// The EXACT generation whose `Data.db` is `data_path` (issue #1283): matched by the file name the
+/// listing reports, so a relative, directory-less path resolves against the same directory.
+pub(crate) fn resolve_exact(dir: &Path, data_path: &Path) -> Result<ComponentSet> {
+    let listing = list_live(dir)?;
+    let wanted = data_path.file_name();
+    let is_it = |g: &Generation| {
+        g.component_path(DATA_COMPONENT)
+            .and_then(Path::file_name)
+            .is_some_and(|n| Some(n) == wanted)
+    };
+    if let Some(generation) = listing.live.iter().find(|g| is_it(g)) {
+        refuse_below_floor(generation)?;
+        return Ok(ComponentSet::from_generation(generation.clone()));
+    }
+    if let Some(orphan) = listing.orphans.iter().find(|g| is_it(g)) {
+        return Err(refuse_orphan(orphan));
+    }
+    Err(Error::not_found(format!(
+        "SSTable Data.db component {} is not a live generation of {}",
+        data_path.display(),
+        dir.display()
+    )))
+}
