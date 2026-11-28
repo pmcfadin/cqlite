@@ -20,6 +20,7 @@ use std::sync::{Arc, OnceLock};
 use super::model::{Condition, Generation};
 use crate::error::{Error, Result};
 use crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback_detailed;
+#[cfg(feature = "write-support")]
 use crate::parser::repair_metadata::{
     parse_repair_metadata, parse_stats_extras, RepairMetadata, StatsExtras,
 };
@@ -44,9 +45,11 @@ pub(super) struct Loaded {
     stats: Arc<SSTableStatistics>,
     /// The repair fields (`repairedAt`, `pendingRepair`, `isTransient`) decoded from the same
     /// bytes with the descriptor's gates (compaction's repair-state classification, #4626).
+    #[cfg(feature = "write-support")]
     repair: std::result::Result<Arc<RepairMetadata>, String>,
     /// The STATS-extras histograms decoded from the same bytes; compaction's baseline seeding
     /// reads the tombstone-drop-time histogram as its authoritative "has a tombstone" signal.
+    #[cfg(feature = "write-support")]
     extras: std::result::Result<Arc<StatsExtras>, String>,
     #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
     facts: std::result::Result<Arc<StatisticsFacts>, String>,
@@ -142,12 +145,14 @@ impl MetadataFailure {
 /// then the bounded read, the strict integrity check and one parse. Gates come from the name when
 /// it has a descriptor, else the parser's nb-compatible default (as `StatisticsReader::open`).
 #[derive(Debug, Clone)]
+#[cfg(feature = "write-support")]
 pub(crate) struct DirectStatistics {
     pub(crate) stats: Arc<SSTableStatistics>,
     pub(crate) repair: std::result::Result<Arc<RepairMetadata>, String>,
     pub(crate) extras: std::result::Result<Arc<StatsExtras>, String>,
 }
 
+#[cfg(feature = "write-support")]
 pub(crate) fn read_direct(path: &Path) -> std::result::Result<DirectStatistics, MetadataFailure> {
     let gates = match VersionGates::from_path(path) {
         Ok(g) => Some(g),
@@ -220,6 +225,7 @@ impl Generation {
 
     /// The repair fields of the trusted `Statistics.db`, from the same single read (G11). A decode
     /// failure is `Corrupt`, naming the file.
+    #[cfg(feature = "write-support")]
     pub(crate) fn repair_metadata(
         &self,
     ) -> std::result::Result<Arc<RepairMetadata>, MetadataFailure> {
@@ -230,12 +236,14 @@ impl Generation {
 
     /// The STATS-extras histograms of the trusted `Statistics.db`, from the same single read
     /// (G11). A decode failure is `Corrupt`, naming the file.
+    #[cfg(feature = "write-support")]
     pub(crate) fn stats_extras(&self) -> std::result::Result<Arc<StatsExtras>, MetadataFailure> {
         self.loaded_with(&read_checked)?
             .extras
             .map_err(|detail| self.corrupt_decode(detail))
     }
 
+    #[cfg(feature = "write-support")]
     fn corrupt_decode(&self, detail: String) -> MetadataFailure {
         MetadataFailure::Corrupt {
             path: self
@@ -328,9 +336,11 @@ impl Generation {
             detail: e.to_string(),
         })?;
         let parsed = parse_statistics_with_fallback_detailed(&bytes, Some(&gates)).map(|(_, s)| s);
+        #[cfg(feature = "write-support")]
         let repair = parse_repair_metadata(&bytes, Some(&gates))
             .map(Arc::new)
             .map_err(|e| e.to_string());
+        #[cfg(feature = "write-support")]
         let extras = parse_stats_extras(&bytes, Some(&gates))
             .map(Arc::new)
             .map_err(|e| e.to_string());
@@ -343,7 +353,9 @@ impl Generation {
         match parsed {
             Ok(stats) => Ok(Loaded {
                 stats: Arc::new(stats),
+                #[cfg(feature = "write-support")]
                 repair,
+                #[cfg(feature = "write-support")]
                 extras,
                 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
                 facts,
