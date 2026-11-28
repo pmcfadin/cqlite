@@ -147,17 +147,16 @@ pub(super) fn record_table_dir_level_findings(
     }
 }
 
-/// Record an EXPLICITLY-named single-file input that carries no `-TOC.txt`
-/// publication barrier (roborev, issue #4196, round-22 Low finding).
+/// Record a salvaged generation that carries no `-TOC.txt` publication barrier
+/// (`TocMissing`): listed from a table directory (issue #4626, GD10) or named as
+/// an explicit single file (roborev, issue #4196, round-22 Low finding).
 ///
-/// The barrier is enforced for a table-DIRECTORY input (a barrier-less
-/// generation there is a named `SkippedInput`, never salvaged) and OVERRIDDEN for
-/// an explicit file path — salvaging an unpublished, partially-flushed
-/// generation is a legitimate recovery scenario. But it must not be silent: the
-/// absence lands in the manifest as an `UnpublishedInputGeneration` finding,
-/// which `is_verification_gap_class` also makes an imperfect (exit 3) outcome, so
-/// the exit code no longer depends on WHICH WAY the same file was named. See
-/// `discover_salvage_inputs`'s doc for the full reasoning.
+/// Salvaging an unpublished, partially-flushed generation is a legitimate
+/// recovery scenario, so the barrier is not enforced. But it must not be silent:
+/// the absence lands in the manifest as an `UnpublishedInputGeneration` finding
+/// naming `TocMissing`, which `is_verification_gap_class` also makes an imperfect
+/// (exit 3) outcome, so the exit code does not depend on WHICH WAY the same file
+/// was named. See `discover_salvage_inputs`'s doc for the full reasoning.
 ///
 /// Attached to the FIRST report, like every other input-level fact; a no-op when
 /// `reports` is empty or nothing was recorded.
@@ -172,13 +171,12 @@ pub(super) fn record_unpublished_input_findings(
         first.component_findings.push(ComponentFinding {
             class: "UnpublishedInputGeneration".to_string(),
             component: path.display().to_string(),
-            detail:
-                "this generation has no sibling -TOC.txt (the publication barrier), so salvage \
-                 cannot know it was ever COMPLETELY written — it was salvaged anyway because it \
-                 was named EXPLICITLY as a file (a table-directory input skips such a generation \
-                 instead), and the recovered output may therefore come from an unpublished, \
-                 partially-flushed generation"
-                    .to_string(),
+            detail: "this generation is TocMissing: it has no sibling -TOC.txt (the publication \
+                 barrier), so salvage cannot know it was ever COMPLETELY written — it was \
+                 salvaged anyway (the generation listing accepts a TocMissing generation, and an \
+                 explicitly named file overrides the barrier), and the recovered output may \
+                 therefore come from an unpublished, partially-flushed generation"
+                .to_string(),
         });
     }
 }

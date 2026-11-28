@@ -21,7 +21,7 @@ string is what makes a silent reword visible.
 | file | scenario | input |
 |---|---|---|
 | `r7_1_table_dir_two_generations.json` | R7.1 — a 2-generation table dir, `--components digest,toc`: ARRAY-shaped, one `refused: null` entry per generation | two renamed copies of the committed `test_comp/lz4_table` fixture |
-| `r3_classification_filter_summary_crc.json` | R3.1/R3.2/R9 — `--components filter,summary,crc` against a compressed input: the full per-field `classification` map plus a real `skipped_not_applicable` entry | the committed `test_comp/lz4_table` fixture + `lz4_table_with_fp_chance.cql` |
+| `r3_classification_filter_summary_crc.json` | R3.1/R3.2/R9 — `--components filter,summary,crc` against a compressed input: the full per-field `classification` map plus a real `skipped_not_applicable` entry; the input copy has no `TOC.txt`, so the entry also carries `input_conditions: ["TocMissing"]` (issue #4626, GD2.1) | the committed `test_comp/lz4_table` fixture + `lz4_table_with_fp_chance.cql` |
 | `r7_2_refused_data_corrupt.json` | R7.2 — the Cassandra-verified `test_comp_corrupt/data_db_bit_flip` fixture refuses with `data-corrupt` at the exact chunk offset | the FETCHED corruption corpus (the test skips when absent) |
 | `lz4_table_with_fp_chance.cql` | the `--schema` input that makes `bloom_filter_fp_chance` RECOVERABLE | — |
 

@@ -488,14 +488,13 @@ fn unparseable_generation_is_named_and_skipped_others_still_salvaged() {
     );
 }
 
-/// Roborev, issue #4196 (round-5 Medium finding 1) — a `*-Data.db` with NO
-/// sibling `*-TOC.txt` (an unpublished generation) is the SAME class of
-/// visibility gap round-4 finding 5 fixed for an unparseable generation
-/// number: named on stderr, recorded in the manifest, and forces an
-/// imperfect (exit 3) outcome — never silently `continue`d out of the run
-/// with zero trace.
+/// Roborev, issue #4196 (round-5 Medium finding 1), AMENDED by issue #4626 (GD10): a `*-Data.db`
+/// with NO sibling `*-TOC.txt` (`TocMissing`) used to be named and skipped; the generation listing
+/// now accepts it, so it is SALVAGED like its published sibling. It is still never silent: the
+/// absence is recorded in the manifest and forces an imperfect (exit 3) outcome, the same as the
+/// explicit-file form (`issue_4196_salvage_publication_barrier.rs`).
 #[test]
-fn toc_less_generation_is_named_and_skipped_others_still_salvaged() {
+fn toc_less_generation_is_salvaged_named_and_forces_exit_3() {
     // COMMITTED fixture — see the sibling test above (issue #3220).
     let clean_dir = resolve_committed_fixture(LZ4_TABLE_FIXTURE, LZ4_TABLE_COMPONENTS);
     let schema = schemas_dir().join("compression-parity.cql");
@@ -503,20 +502,22 @@ fn toc_less_generation_is_named_and_skipped_others_still_salvaged() {
     let input_dir = temp.path().join("input");
     std::fs::create_dir_all(&input_dir).unwrap();
 
-    // A real, healthy generation (nb-1-big-*), copied verbatim.
+    // Two REAL generations: nb-1-big-* verbatim, and nb-2-big-* the same components renamed (a
+    // generation is a pure filename property), with nb-2's TOC.txt left out.
     for entry in std::fs::read_dir(&clean_dir)
         .expect("read clean dir")
         .flatten()
     {
-        let name = entry.file_name();
-        if name.to_string_lossy().starts_with("nb-1-big-") {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("nb-1-big-") {
             std::fs::copy(entry.path(), input_dir.join(&name)).expect("copy fixture component");
+            if !name.ends_with("-TOC.txt") {
+                let renamed = name.replacen("nb-1-", "nb-2-", 1);
+                std::fs::copy(entry.path(), input_dir.join(renamed)).expect("copy as nb-2");
+            }
         }
     }
-
-    // A well-formed generation number (nb-2-big-Data.db), but with NO
-    // sibling TOC.txt at all — must be skipped, NOT silently ignored.
-    std::fs::write(input_dir.join("nb-2-big-Data.db"), b"not a real sstable").unwrap();
+    assert!(!input_dir.join("nb-2-big-TOC.txt").exists());
 
     let out = temp.path().join("out");
     let output = run_cli(&[
@@ -533,17 +534,12 @@ fn toc_less_generation_is_named_and_skipped_others_still_salvaged() {
     ]);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("nb-2-big-Data.db") && stderr.contains("skipping"),
-        "stderr must NAME the skipped TOC-less file; got: {stderr}"
-    );
-
     let code = output.status.code();
     assert_eq!(
         code,
         Some(3),
-        "a skipped TOC-less sibling must force exit 3 (never 0, and never 1 — it must not abort \
-         the run); got {code:?}; stdout={}\nstderr={stderr}",
+        "a salvaged TOC-less generation leaves its completeness unverifiable: exit 3, never 0 \
+         and never 1; got {code:?}; stdout={}\nstderr={stderr}",
         String::from_utf8_lossy(&output.stdout)
     );
 
@@ -555,9 +551,8 @@ fn toc_less_generation_is_named_and_skipped_others_still_salvaged() {
         .unwrap_or_else(|| panic!("expected a JSON array (table-dir input); got {manifest}"));
     assert_eq!(
         entries.len(),
-        1,
-        "expected exactly ONE manifest entry — the TOC-less generation must be excluded \
-         entirely; got {entries:?}"
+        2,
+        "BOTH generations are salvaged — the TOC-less one is no longer excluded; got {entries:?}"
     );
     let findings = entries[0]
         .get("component_findings")
@@ -567,13 +562,13 @@ fn toc_less_generation_is_named_and_skipped_others_still_salvaged() {
         findings
             .iter()
             .any(
-                |f| f.get("class").and_then(|c| c.as_str()) == Some("SkippedInputGeneration")
+                |f| f.get("class").and_then(|c| c.as_str()) == Some("UnpublishedInputGeneration")
                     && f.get("component")
                         .and_then(|c| c.as_str())
                         .map(|c| c.contains("nb-2-big-Data.db"))
                         .unwrap_or(false)
             ),
-        "manifest component_findings must NAME the skipped TOC-less file; got {findings:?}"
+        "manifest component_findings must NAME the TOC-less generation; got {findings:?}"
     );
 }
 

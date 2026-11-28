@@ -863,26 +863,12 @@ fn all_attempted_generations_refused_plus_a_skipped_sibling_exits_3_not_2() {
         }
     }
 
-    // Generation 2: a real, healthy generation renumbered nb-2-big-*, with
-    // its -TOC.txt DELIBERATELY OMITTED — SKIPPED at discovery, never
-    // attempted at all.
-    for component in LZ4_TABLE.components {
-        if *component == "nb-1-big-TOC.txt" {
-            continue;
-        }
-        let Some(suffix) = component.strip_prefix("nb-1-big-") else {
-            continue;
-        };
-        std::fs::copy(
-            clean_dir.join(component),
-            input_dir.join(format!("nb-2-big-{suffix}")),
-        )
-        .unwrap_or_else(|e| panic!("copy {component}: {e}"));
-    }
-    assert!(
-        !input_dir.join("nb-2-big-TOC.txt").exists(),
-        "the case needs generation 2 to have NO -TOC.txt sibling"
-    );
+    // Generation 2: SKIPPED at discovery, never attempted at all. It used to be a healthy
+    // generation with its -TOC.txt omitted; issue #4626 (GD10) makes that a SALVAGED `TocMissing`
+    // generation, so the skip is now an Orphan (a zero-length Data.db), which the generation
+    // listing still names and skips.
+    std::fs::write(input_dir.join("nb-2-big-Data.db"), b"").expect("write orphan");
+    let _ = &clean_dir;
 
     let out = temp.path().join("out");
     let output = run_cli_for_table_dir(&input_dir, &out);

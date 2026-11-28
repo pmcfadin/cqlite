@@ -73,10 +73,10 @@ exercises. Commit after each unit (#3042). Each migration PR deletes the copy it
 
 ## 4. rebuild and salvage (PR 4)
 
-- [ ] 4.1 `rebuild/simple.rs:87` and `cqlite-cli/src/commands/rebuild.rs:113` list through the module;
+- [x] 4.1 `rebuild/simple.rs:87` and `cqlite-cli/src/commands/rebuild.rs:113` list through the module;
       `rebuild-components` GD1 to GD3, `cli-rebuild` GD4. Surface: `cqlite rebuild` over a `ma-1-big` input
       (UnsupportedVersion) and a TOC-deleted copy.
-- [ ] 4.2 `salvage` lists through the module; `cli-salvage` GD10. Surface: `cqlite salvage`.
+- [x] 4.2 `salvage` lists through the module; `cli-salvage` GD10. Surface: `cqlite salvage`.
 - [ ] 4.3 Phase closing tasks.
 
 ## 5. merge/mod.rs Statistics reads, and the file split (PR 5)

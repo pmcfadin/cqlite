@@ -267,9 +267,11 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
         }
     };
     // roborev, issue #4196 (batched finding h; round-5 Medium extended it to
-    // a missing TOC.txt): a `*-Data.db` discovery declines to attempt — an
-    // unparseable generation number, or a missing publication barrier — is a
-    // NAMED, SKIPPED entry, never silently dropped. Named here,
+    // a missing TOC.txt; issue #4626 moved both onto the generation module): a
+    // `*-Data.db` discovery declines to attempt — a name the listing does not
+    // recognise, a below-floor generation, or an Orphan — is a NAMED, SKIPPED
+    // entry, never silently dropped. A `TocMissing` generation is no longer
+    // skipped (GD10): it is salvaged and recorded below. Named here,
     // unconditionally, even when other generations exist to salvage.
     for skipped in &discovery.skipped {
         eprintln!(
@@ -282,8 +284,8 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
     if generations.is_empty() {
         if discovery.skipped.is_empty() {
             eprintln!(
-                "cqlite salvage: no published *-Data.db found under {} (a Data.db needs a \
-                 sibling TOC.txt)",
+                "cqlite salvage: no live *-Data.db found under {} (the generation listing \
+                 returned nothing to salvage)",
                 args.input.display()
             );
         } else {

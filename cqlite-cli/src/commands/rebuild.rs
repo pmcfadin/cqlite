@@ -8,11 +8,13 @@
 
 use std::path::{Path, PathBuf};
 
+use cqlite_core::storage::sstable::generation::Generation;
 use cqlite_core::storage::write_engine::rebuild::{
-    rebuild_components, Component, RebuildOptions, RebuildReport,
+    rebuild_components, rebuild_generation, Component, RebuildOptions, RebuildReport,
 };
 
 use crate::cli_types::{RebuildArgs, RebuildOutFormatArg};
+use crate::commands::generation_listing::{data_path, list_live, print_notes};
 
 /// `true` iff `id` is EXACTLY 32 lowercase hex chars — a Cassandra table-id
 /// suffix (mirrors `commands::salvage::discovery`'s own predicate, kept as a
@@ -33,10 +35,19 @@ fn is_table_id_suffix(id: &str) -> bool {
 /// command does not need; `--table` covers any input this simpler
 /// derivation cannot resolve.
 fn table_name_from_input(input: &Path) -> Option<String> {
+    // A bare relative `Data.db` (`parent()` is `""`) lives in the current directory.
+    let cwd;
     let dir_name = if input.is_dir() {
         input.file_name()?.to_str()?
     } else {
-        input.parent()?.file_name()?.to_str()?
+        let parent = match input.parent()? {
+            p if p.as_os_str().is_empty() => {
+                cwd = std::env::current_dir().ok()?;
+                cwd.as_path()
+            }
+            p => p,
+        };
+        parent.file_name()?.to_str()?
     };
     match dir_name.rsplit_once('-') {
         Some((table_name, id)) if !table_name.is_empty() && is_table_id_suffix(id) => {
@@ -94,14 +105,45 @@ fn resolve_existing_prefix(path: &Path) -> std::io::Result<PathBuf> {
     }
 }
 
-/// Resolve `input` into the `Data.db` generation(s) to rebuild, oldest first.
-/// A single `Data.db` file is returned as-is; a directory is scanned for
-/// `*-big-Data.db` / `*-bti-Data.db` siblings (rebuild does not require a
-/// `TOC.txt` publication barrier the way `salvage` does — regenerating a
-/// missing `TOC.txt` is itself one of this command's jobs).
-fn discover_generations(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
+/// One unit of the run's plan.
+enum Planned {
+    /// A single `Data.db` named explicitly: `rebuild_components` resolves it through the module.
+    File(PathBuf),
+    /// A generation of the table directory's Live set (issue #4626, GD4).
+    Listed(Generation),
+}
+
+impl Planned {
+    fn data_path(&self) -> PathBuf {
+        match self {
+            Planned::File(p) => p.clone(),
+            Planned::Listed(g) => data_path(g),
+        }
+    }
+}
+
+/// What the run will do, oldest generation first.
+struct Plan {
+    items: Vec<Planned>,
+    /// Orphans (`Data.db` missing or zero-length): named in the manifest, never rebuilt.
+    orphans: Vec<Generation>,
+    /// `*-Data.db` files the listing ignores (not an SSTable component name): they refuse the run
+    /// by name, never silently dropped (G13).
+    unrecognised: Vec<PathBuf>,
+}
+
+/// Resolve `input` into the generation(s) to rebuild. A single `Data.db` file is returned as-is;
+/// a directory is listed through the generation module with Scope Live, `TocMissing` accepted
+/// (rebuild does not require a `TOC.txt` publication barrier the way a reader does: regenerating
+/// a missing `TOC.txt` is itself one of this command's jobs). The module never recurses, so
+/// `snapshots/` and `backups/` are never entered.
+fn plan_generations(input: &Path) -> anyhow::Result<Plan> {
     if input.is_file() {
-        return Ok(vec![input.to_path_buf()]);
+        return Ok(Plan {
+            items: vec![Planned::File(input.to_path_buf())],
+            orphans: Vec::new(),
+            unrecognised: Vec::new(),
+        });
     }
     if !input.is_dir() {
         return Err(anyhow::anyhow!(
@@ -109,28 +151,41 @@ fn discover_generations(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
             input.display()
         ));
     }
-    let mut found: Vec<(u64, PathBuf)> = Vec::new();
-    for entry in std::fs::read_dir(input)? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        let is_data = name.ends_with("-big-Data.db") || name.ends_with("-bti-Data.db");
-        if !is_data {
-            continue;
-        }
-        let generation = name
-            .split('-')
-            .nth(1)
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
-        found.push((generation, path));
-    }
-    found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    Ok(found.into_iter().map(|(_, p)| p).collect())
+    let listing = list_live(input)?;
+    print_notes("rebuild", &listing.notes);
+    Ok(Plan {
+        items: listing.live.into_iter().map(Planned::Listed).collect(),
+        orphans: listing.orphans,
+        // Other ignored files (`.gitignore`, `notes.txt`) are not SSTable-like and stay ignored.
+        unrecognised: listing
+            .ignored
+            .into_iter()
+            .filter(|p| {
+                p.is_file()
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.ends_with("-Data.db"))
+            })
+            .collect(),
+    })
+}
+
+/// The manifest entries for Orphans: named with their condition, not refused, not rebuilt, and
+/// carrying no `output` (nothing was written for them). Appended AFTER every generation's entry, so
+/// the leading-entries rollback bookkeeping of the run is unaffected.
+fn orphan_reports(orphans: &[Generation], components: &[Component]) -> Vec<RebuildReport> {
+    orphans
+        .iter()
+        .map(|g| {
+            RebuildReport::for_unopened_generation(
+                g,
+                &data_path(g),
+                Path::new(""),
+                components,
+                None,
+            )
+        })
+        .collect()
 }
 
 /// Render + (optionally) write the manifest for the WHOLE run. Mirrors
@@ -312,20 +367,89 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
         }
     };
 
-    let generations = match discover_generations(&args.input) {
-        Ok(g) if !g.is_empty() => g,
-        Ok(_) => {
-            eprintln!(
-                "cqlite rebuild: no *-Data.db found under {}",
-                args.input.display()
-            );
-            std::process::exit(1);
-        }
+    let Plan {
+        items: generations,
+        orphans,
+        unrecognised,
+    } = match plan_generations(&args.input) {
+        Ok(p) => p,
         Err(e) => {
             eprintln!("cqlite rebuild: {e:#}");
             std::process::exit(1);
         }
     };
+    // GD4 / R7.4 / G13: a below-floor generation, or a `*-Data.db` the listing does not
+    // recognise, refuses the whole run (R7: exit 2 = REFUSED, nothing written; there is no partial
+    // code), decided from the listing BEFORE anything is built, so `--out` is never created for this refusal. The
+    // other live generations are reported rolled back (nothing regenerated), the same shape R9
+    // gives a rolled-back entry.
+    if !unrecognised.is_empty()
+        || generations
+            .iter()
+            .any(|p| matches!(p, Planned::Listed(g) if g.below_floor().is_some()))
+    {
+        let mut reports = Vec::new();
+        for planned in &generations {
+            let Planned::Listed(g) = planned else {
+                continue;
+            };
+            let out_dir = if generations.len() > 1 {
+                out.join(g.base_name())
+            } else {
+                out.clone()
+            };
+            let refusal = RebuildReport::unsupported_version_refusal(g);
+            let refused = refusal.is_some();
+            let mut report = RebuildReport::for_unopened_generation(
+                g,
+                &data_path(g),
+                &out_dir,
+                &components,
+                refusal,
+            );
+            if !refused {
+                report.mark_rolled_back();
+            }
+            reports.push(report);
+        }
+        for path in &unrecognised {
+            eprintln!(
+                "cqlite rebuild: refusing the run: {} is not an SSTable component name",
+                path.display()
+            );
+            reports.push(RebuildReport::for_unrecognised_file(path, &components));
+        }
+        reports.extend(orphan_reports(&orphans, &components));
+        if let Err(e) = render_and_write_reports(&reports, true, args) {
+            eprintln!("cqlite rebuild: failed to write report: {e:#}");
+            std::process::exit(1);
+        }
+        std::process::exit(2);
+    }
+
+    if generations.is_empty() {
+        // Nothing live to rebuild. Orphans are still named in the manifest (GD4). The exit is 1:
+        // R7 allows only 0 (every requested component regenerated), 2 (a generation REFUSED) and
+        // 1 (a usage error, cause on stderr), with no partial-success code (design D3); nothing was
+        // rebuilt and nothing was refused, so this is the usage error "the input has no live
+        // generation", exactly as an empty directory already is.
+        if !orphans.is_empty() {
+            let reports = orphan_reports(&orphans, &components);
+            if let Err(e) = render_and_write_reports(&reports, true, args) {
+                eprintln!("cqlite rebuild: failed to write report: {e:#}");
+            }
+        }
+        eprintln!(
+            "cqlite rebuild: no live *-Data.db found under {}{}",
+            args.input.display(),
+            if orphans.is_empty() {
+                ""
+            } else {
+                " (only Orphans, reported in the manifest and not rebuilt)"
+            }
+        );
+        std::process::exit(1);
+    }
 
     let mut reports = Vec::with_capacity(generations.len());
     let mut any_refused = false;
@@ -339,7 +463,8 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
     // one — `--out` ends up holding nothing whenever the run's overall
     // exit is 2, matching a single-`Data.db` input's behavior exactly.
     let mut written_out_dirs: Vec<PathBuf> = Vec::new();
-    for data_db_path in &generations {
+    for planned in &generations {
+        let data_db_path = planned.data_path();
         let out_dir = if generations.len() > 1 {
             out.join(
                 data_db_path
@@ -356,7 +481,11 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
             out_dir: out_dir.clone(),
             statistics_recovery_source: None,
         };
-        match rebuild_components(data_db_path, &schema, &components, &options).await {
+        let outcome = match planned {
+            Planned::File(path) => rebuild_components(path, &schema, &components, &options).await,
+            Planned::Listed(g) => rebuild_generation(g, &schema, &components, &options).await,
+        };
+        match outcome {
             Ok(report) => {
                 let refused = report.refused.is_some();
                 reports.push(report);
@@ -438,8 +567,13 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
                     report.mark_rolled_back();
                 }
                 let is_table_dir = args.input.is_dir();
-                if let Err(write_err) = render_and_write_reports(&reports, is_table_dir, args) {
-                    eprintln!("cqlite rebuild: failed to write report: {write_err:#}");
+                reports.extend(orphan_reports(&orphans, &components));
+                // A single-file input that fails writes nothing (R7.3 usage error): there is no
+                // report to render, and "no report generated" would only be noise.
+                if !reports.is_empty() {
+                    if let Err(write_err) = render_and_write_reports(&reports, is_table_dir, args) {
+                        eprintln!("cqlite rebuild: failed to write report: {write_err:#}");
+                    }
                 }
                 eprintln!("cqlite rebuild: {e}");
                 std::process::exit(1);
@@ -448,6 +582,7 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
     }
 
     let is_table_dir = args.input.is_dir();
+    reports.extend(orphan_reports(&orphans, &components));
     if let Err(e) = render_and_write_reports(&reports, is_table_dir, args) {
         eprintln!("cqlite rebuild: failed to write report: {e:#}");
         std::process::exit(1);

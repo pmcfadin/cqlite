@@ -3,6 +3,9 @@
   "output": "<out>",
   "format": "nb",
   "compressed_input": true,
+  "input_conditions": [
+    "TocMissing"
+  ],
   "requested": [
     "filter",
     "summary",

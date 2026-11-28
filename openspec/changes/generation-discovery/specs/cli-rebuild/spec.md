@@ -21,4 +21,4 @@ SHALL NOT be rebuilt. `snapshots/` and `backups/` SHALL NOT be entered.
 #### Scenario: GD4.2 snapshots are not rebuilt
 - **Given** a table directory with `nb-1-big-*` and `snapshots/pre/nb-1-big-*`
 - **When** `cqlite rebuild <table-dir>` runs
-- **Then** exactly one output subdirectory is produced.
+- **Then** exactly one generation is rebuilt: the manifest has one entry and `--out` holds one `Data.db` (a single live generation is written flat per R7.1), and nothing under `snapshots/` is read.

@@ -41,6 +41,11 @@ pub(super) struct Loaded {
     stats: Arc<SSTableStatistics>,
     #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
     facts: std::result::Result<Arc<StatisticsFacts>, String>,
+    /// The `SerializationHeader.EncodingStats` triple `(minTimestamp, minLocalDeletionTime,
+    /// minTTL)` from the same bytes, `None` when the header does not carry it. Kept apart from
+    /// `facts` so an undecodable repair block does not hide it (`rebuild`, GD3).
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+    encoding_baseline: Option<(i64, i64, i64)>,
 }
 
 /// STATS fields decoded once, inside the loader, from the same bytes as the typed value.
@@ -169,6 +174,16 @@ impl Generation {
         self.statistics_facts_via(&read_checked)
     }
 
+    /// The `SerializationHeader.EncodingStats` baseline `(minTimestamp, minLocalDeletionTime,
+    /// minTTL)` of the trusted `Statistics.db`, or `None` when its header does not carry one
+    /// (`rebuild` reads it as the delta-encoding baseline of the unchanged `Data.db`, GD3).
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+    pub fn encoding_stats_baseline(
+        &self,
+    ) -> std::result::Result<Option<(i64, i64, i64)>, MetadataFailure> {
+        self.loaded_with(&read_checked).map(|l| l.encoding_baseline)
+    }
+
     /// [`Generation::statistics_facts`] with the file read injected. Not part of the stable
     /// surface.
     #[doc(hidden)]
@@ -238,11 +253,16 @@ impl Generation {
         // The facts are decoded from the same buffer; it is dropped when this function returns.
         #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
         let facts = decode_facts(&bytes, &gates).map(Arc::new);
+        #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+        let encoding_baseline =
+            crate::parser::enhanced_statistics_parser::read_encoding_stats_baseline(&bytes);
         match parsed {
             Ok(stats) => Ok(Loaded {
                 stats: Arc::new(stats),
                 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
                 facts,
+                #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+                encoding_baseline,
             }),
             Err(e) => Err(MetadataFailure::Corrupt {
                 path,
