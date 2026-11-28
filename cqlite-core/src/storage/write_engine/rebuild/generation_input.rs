@@ -9,6 +9,14 @@ use crate::storage::sstable::generation::{
 };
 use std::path::Path;
 
+/// The directory to list for a file path: its parent, or `.` for a bare relative name.
+fn listing_dir(file: &Path) -> Option<&Path> {
+    match file.parent()? {
+        p if p.as_os_str().is_empty() => Some(Path::new(".")),
+        p => Some(p),
+    }
+}
+
 /// A listing failure (a transaction log that is inconsistent, unreadable or misnamed) refuses the
 /// run, naming the log.
 pub(super) fn listing_error(error: GenerationError) -> Error {
@@ -31,7 +39,8 @@ pub(super) fn check_floor(generation: &Generation) -> Result<()> {
 /// does not return as live is refused by name: an Orphan, a file a transaction log hides, or a
 /// name that is not an SSTable component at all.
 pub(super) fn resolve_input(data_db_path: &Path) -> Result<Generation> {
-    let dir = data_db_path.parent().ok_or_else(|| {
+    // A bare relative `nb-1-big-Data.db` has `parent() == Some("")`: its directory is `.`.
+    let dir = listing_dir(data_db_path).ok_or_else(|| {
         Error::InvalidInput(format!(
             "input path has no parent directory: {}",
             data_db_path.display()
@@ -85,7 +94,7 @@ pub(super) fn statistics_source(
     let name = aside.file_name()?.to_str()?;
     // A file renamed aside has no `Data.db` beside it: the listing returns it as an Orphan, which
     // still carries its components and the trusted-metadata accessor.
-    let listing = list_generations(aside.parent()?, &Scope::Live, TocPolicy::Accept).ok()?;
+    let listing = list_generations(listing_dir(aside)?, &Scope::Live, TocPolicy::Accept).ok()?;
     listing.live.into_iter().chain(listing.orphans).find(|g| {
         g.component_path("Statistics.db")
             .and_then(|p| p.file_name())

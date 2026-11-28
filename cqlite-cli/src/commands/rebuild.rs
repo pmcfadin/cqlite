@@ -35,10 +35,19 @@ fn is_table_id_suffix(id: &str) -> bool {
 /// command does not need; `--table` covers any input this simpler
 /// derivation cannot resolve.
 fn table_name_from_input(input: &Path) -> Option<String> {
+    // A bare relative `Data.db` (`parent()` is `""`) lives in the current directory.
+    let cwd;
     let dir_name = if input.is_dir() {
         input.file_name()?.to_str()?
     } else {
-        input.parent()?.file_name()?.to_str()?
+        let parent = match input.parent()? {
+            p if p.as_os_str().is_empty() => {
+                cwd = std::env::current_dir().ok()?;
+                cwd.as_path()
+            }
+            p => p,
+        };
+        parent.file_name()?.to_str()?
     };
     match dir_name.rsplit_once('-') {
         Some((table_name, id)) if !table_name.is_empty() && is_table_id_suffix(id) => {
@@ -347,19 +356,75 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
         items: generations,
         orphans,
     } = match plan_generations(&args.input) {
-        Ok(p) if !p.items.is_empty() => p,
-        Ok(_) => {
-            eprintln!(
-                "cqlite rebuild: no live *-Data.db found under {}",
-                args.input.display()
-            );
-            std::process::exit(1);
-        }
+        Ok(p) => p,
         Err(e) => {
             eprintln!("cqlite rebuild: {e:#}");
             std::process::exit(1);
         }
     };
+    if generations.is_empty() {
+        // Nothing live to rebuild. Orphans are still named in the manifest (GD4). The exit is 1:
+        // R7 allows only 0 (every requested component regenerated), 2 (a generation REFUSED) and
+        // 1 (a usage error, cause on stderr), with no partial-success code (design D3); nothing was
+        // rebuilt and nothing was refused, so this is the usage error "the input has no live
+        // generation", exactly as an empty directory already is.
+        if !orphans.is_empty() {
+            let reports = orphan_reports(&orphans, &components);
+            if let Err(e) = render_and_write_reports(&reports, true, args) {
+                eprintln!("cqlite rebuild: failed to write report: {e:#}");
+            }
+        }
+        eprintln!(
+            "cqlite rebuild: no live *-Data.db found under {}{}",
+            args.input.display(),
+            if orphans.is_empty() {
+                ""
+            } else {
+                " (only Orphans, reported in the manifest and not rebuilt)"
+            }
+        );
+        std::process::exit(1);
+    }
+
+    // GD4 / R7.4: a below-floor generation refuses the whole run, decided from the listing's
+    // descriptors BEFORE anything is built, so `--out` is never created for this refusal. The
+    // other live generations are reported rolled back (nothing regenerated), the same shape R9
+    // gives a rolled-back entry.
+    if generations
+        .iter()
+        .any(|p| matches!(p, Planned::Listed(g) if g.below_floor().is_some()))
+    {
+        let mut reports = Vec::new();
+        for planned in &generations {
+            let Planned::Listed(g) = planned else {
+                continue;
+            };
+            let out_dir = if generations.len() > 1 {
+                out.join(g.base_name())
+            } else {
+                out.clone()
+            };
+            let refusal = RebuildReport::unsupported_version_refusal(g);
+            let refused = refusal.is_some();
+            let mut report = RebuildReport::for_unopened_generation(
+                g,
+                &data_path(g),
+                &out_dir,
+                &components,
+                refusal,
+            );
+            if !refused {
+                report.mark_rolled_back();
+            }
+            reports.push(report);
+        }
+        reports.extend(orphan_reports(&orphans, &components));
+        if let Err(e) = render_and_write_reports(&reports, true, args) {
+            eprintln!("cqlite rebuild: failed to write report: {e:#}");
+            std::process::exit(1);
+        }
+        std::process::exit(2);
+    }
 
     let mut reports = Vec::with_capacity(generations.len());
     let mut any_refused = false;
@@ -393,18 +458,7 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
         };
         let outcome = match planned {
             Planned::File(path) => rebuild_components(path, &schema, &components, &options).await,
-            // GD4: a below-floor generation is a refused manifest entry (and so rolls the whole
-            // run back as R7.4 specifies), decided from the descriptor with nothing opened.
-            Planned::Listed(g) => match RebuildReport::unsupported_version_refusal(g) {
-                Some(refusal) => Ok(RebuildReport::for_unopened_generation(
-                    g,
-                    &data_db_path,
-                    &out_dir,
-                    &components,
-                    Some(refusal),
-                )),
-                None => rebuild_generation(g, &schema, &components, &options).await,
-            },
+            Planned::Listed(g) => rebuild_generation(g, &schema, &components, &options).await,
         };
         match outcome {
             Ok(report) => {
@@ -489,8 +543,12 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
                 }
                 let is_table_dir = args.input.is_dir();
                 reports.extend(orphan_reports(&orphans, &components));
-                if let Err(write_err) = render_and_write_reports(&reports, is_table_dir, args) {
-                    eprintln!("cqlite rebuild: failed to write report: {write_err:#}");
+                // A single-file input that fails writes nothing (R7.3 usage error): there is no
+                // report to render, and "no report generated" would only be noise.
+                if !reports.is_empty() {
+                    if let Err(write_err) = render_and_write_reports(&reports, is_table_dir, args) {
+                        eprintln!("cqlite rebuild: failed to write report: {write_err:#}");
+                    }
                 }
                 eprintln!("cqlite rebuild: {e}");
                 std::process::exit(1);

@@ -464,3 +464,197 @@ fn gd10_txn_inconsistent_directory_is_refused_naming_the_log() {
     );
     assert!(!has_data_db(&out));
 }
+
+// ------------------------------------------------------------- review follow-ups (PR #4673)
+
+/// A bare relative `Data.db` (its `parent()` is `""`) names a file in the current directory: both
+/// verbs list `.`, not the empty path.
+#[test]
+fn a_bare_relative_data_db_is_listed_from_the_current_directory() {
+    let root = TempDir::new().unwrap();
+    let dir = one_generation_dir(root.path());
+    let schema = schema_file(root.path(), "snap_backup");
+    let out = root.path().join("out_rebuild");
+    let o = Command::new(env!("CARGO_BIN_EXE_cqlite"))
+        .current_dir(&dir)
+        .args([
+            os("--schema"),
+            schema.as_os_str(),
+            os("rebuild"),
+            os("nb-1-big-Data.db"),
+            os("--table"),
+            os("snap_backup"),
+            os("--components"),
+            os("digest,toc"),
+            os("--out"),
+            out.as_os_str(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", err_text(&o));
+    assert!(out.join("nb-1-big-Digest.crc32").is_file());
+
+    let out = root.path().join("out_salvage");
+    let o = Command::new(env!("CARGO_BIN_EXE_cqlite"))
+        .current_dir(&dir)
+        .args([
+            os("--schema"),
+            schema.as_os_str(),
+            os("salvage"),
+            os("nb-1-big-Data.db"),
+            os("--table"),
+            os("snap_backup"),
+            os("--out"),
+            out.as_os_str(),
+            os("--out-format"),
+            os("json"),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", err_text(&o));
+    assert!(has_data_db(&out));
+}
+
+/// GD4: a directory holding only Orphans writes the manifest naming them, rebuilds nothing, and
+/// exits 1 (nothing was rebuilt and nothing was refused; R7 has no partial-success code).
+#[test]
+fn an_orphan_only_directory_writes_its_manifest_and_exits_1() {
+    let root = TempDir::new().unwrap();
+    let dir = root
+        .path()
+        .join("gd4626")
+        .join("snap_backup-0123456789abcdef0123456789abcdef");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("nb-9-big-Data.db"), b"").unwrap();
+    let schema = schema_file(root.path(), "snap_backup");
+    let out = root.path().join("out");
+    let m = root.path().join("m.json");
+    let o = rebuild(&schema, &dir, &out, &m, "digest");
+    assert_eq!(o.status.code(), Some(1), "{}", err_text(&o));
+    let entries = manifest(&m);
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(
+        entries[0]["input_conditions"],
+        serde_json::json!(["Orphan"])
+    );
+    assert!(!out.exists());
+}
+
+/// A single explicit Orphan file is a usage error naming the condition (R7.3: nothing written, no
+/// manifest): there is no table-directory run for an entry to belong to.
+#[test]
+fn an_explicit_orphan_file_is_a_named_usage_error() {
+    let root = TempDir::new().unwrap();
+    let dir = one_generation_dir(root.path());
+    std::fs::write(dir.join("nb-9-big-Data.db"), b"").unwrap();
+    let schema = schema_file(root.path(), "snap_backup");
+    let out = root.path().join("out");
+    let m = root.path().join("m.json");
+    let o = rebuild(&schema, &dir.join("nb-9-big-Data.db"), &out, &m, "digest");
+    assert_eq!(o.status.code(), Some(1));
+    assert!(err_text(&o).contains("Orphan"), "{}", err_text(&o));
+    assert!(
+        !err_text(&o).contains("no report generated"),
+        "{}",
+        err_text(&o)
+    );
+    assert!(!m.exists() && !out.exists());
+}
+
+/// An explicit `ma-1-big-Data.db` is an UnsupportedVersion error (GD1) without the spurious
+/// "no report generated" line.
+#[test]
+fn an_explicit_below_floor_file_fails_without_a_spurious_report_error() {
+    let root = TempDir::new().unwrap();
+    let dir = one_generation_dir(root.path());
+    touch(&dir.join("ma-1-big-Data.db"));
+    let schema = schema_file(root.path(), "snap_backup");
+    let o = rebuild(
+        &schema,
+        &dir.join("ma-1-big-Data.db"),
+        &root.path().join("out"),
+        &root.path().join("m.json"),
+        "digest",
+    );
+    assert_eq!(o.status.code(), Some(1));
+    let err = err_text(&o);
+    assert!(err.contains("Unsupported SSTable version"), "{err}");
+    assert!(!err.contains("no report generated"), "{err}");
+}
+
+/// Item 6: the below-floor refusal is decided before anything is built, so `--out` is never
+/// created, and every non-refused entry is reported rolled back.
+#[test]
+fn a_below_floor_directory_creates_no_output_at_all() {
+    let root = TempDir::new().unwrap();
+    let dir = seeded(root.path(), "snap_backup", "snap_backup");
+    touch(&dir.join("ma-1-big-Data.db"));
+    let schema = schema_file(root.path(), "snap_backup");
+    let out = root.path().join("out");
+    let m = root.path().join("m.json");
+    let o = rebuild(&schema, &dir, &out, &m, "digest,toc");
+    assert_eq!(o.status.code(), Some(2), "{}", err_text(&o));
+    assert!(!out.exists(), "--out must never be created on this refusal");
+    assert_eq!(manifest(&m).len(), 6);
+}
+
+fn salvage_single(schema: &Path, file: &Path, out: &Path) -> Output {
+    salvage(schema, file, out)
+}
+
+/// Salvage's explicit-file form applies the module's conditions: each is a named refusal (exit 1,
+/// nothing written), never a generic hard error from the reader.
+#[test]
+fn an_explicit_file_is_refused_by_name_for_each_module_condition() {
+    let root = TempDir::new().unwrap();
+    let schema = schema_file(root.path(), "snap_backup");
+
+    // below the floor
+    let dir = one_generation_dir(root.path());
+    touch(&dir.join("ma-1-big-Data.db"));
+    let out = root.path().join("o1");
+    let o = salvage_single(&schema, &dir.join("ma-1-big-Data.db"), &out);
+    assert_eq!(o.status.code(), Some(1), "{}", err_text(&o));
+    assert!(
+        err_text(&o).contains("UnsupportedVersion"),
+        "{}",
+        err_text(&o)
+    );
+    assert!(!has_data_db(&out));
+
+    // Orphan
+    std::fs::write(dir.join("nb-9-big-Data.db"), b"").unwrap();
+    let o = salvage_single(
+        &schema,
+        &dir.join("nb-9-big-Data.db"),
+        &root.path().join("o2"),
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(err_text(&o).contains("Orphan"), "{}", err_text(&o));
+
+    // UUID id
+    let uuid_dir = seeded(root.path(), "uuid_ids", "uuid_only");
+    let uuid_schema = schema_file(root.path(), "uuid_only");
+    let o = salvage_single(
+        &uuid_schema,
+        &uuid_dir.join("nb-3h5t_0i6t_1jigq2lxu6305iz8wl-big-Data.db"),
+        &root.path().join("o3"),
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(err_text(&o).contains("UUID"), "{}", err_text(&o));
+
+    // hidden by a committed transaction log
+    let (_r, hidden_dir) = stamped_fixture_copy("txn_committed");
+    let hidden_schema = schema_file(root.path(), "txn_compaction");
+    let o = salvage_single(
+        &hidden_schema,
+        &hidden_dir.join("nb-1-big-Data.db"),
+        &root.path().join("o4"),
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        err_text(&o).contains("nb_txn_compaction_"),
+        "{}",
+        err_text(&o)
+    );
+}

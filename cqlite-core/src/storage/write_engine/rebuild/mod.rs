@@ -195,6 +195,7 @@ pub struct RebuildOptions {
 /// Why [`rebuild_components`] refused to write anything (design D3/D5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum RefusalReason {
     /// `Data.db` itself could not be trusted as the source of truth (a
     /// chunk-CRC failure, or a partition failed to decode structurally while

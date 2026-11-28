@@ -135,8 +135,10 @@ pub(super) fn discover_salvage_inputs(input: &Path) -> anyhow::Result<SalvageDis
     })
 }
 
-/// The single-file input: salvaged as named; `TocMissing` is read from the module's listing of its
-/// directory, not from a probe of its own.
+/// The single-file input: salvaged as named, but the module's conditions apply as they do to a
+/// table directory (Q37, Q41, GD10): a below-floor, Orphan, txn-hidden or UUID-id file is refused
+/// by name, never handed to the reader to fail as a generic hard error. `TocMissing` is read from
+/// the module's listing of its directory, not from a probe of its own.
 fn single_file(input: &Path) -> anyhow::Result<SalvageDiscovery> {
     let mut barrier_absent = Vec::new();
     let parent = match input.parent() {
@@ -144,15 +146,42 @@ fn single_file(input: &Path) -> anyhow::Result<SalvageDiscovery> {
         _ => Path::new("."),
     };
     let listing = list_live(parent)?;
+    print_notes("salvage", &listing.notes);
     if let Some(named) = input.file_name().and_then(|n| n.to_str()) {
         let is_this = |g: &&Generation| format!("{}-Data.db", g.base_name()) == named;
-        if listing
-            .live
+        if let Some(g) = listing.live.iter().find(is_this) {
+            if let Some(below) = g.below_floor() {
+                return Err(anyhow::anyhow!(
+                    "{named}: UnsupportedVersion ({} is below the supported floor {}); salvage \
+                     does not read it",
+                    below.version,
+                    below.floor
+                ));
+            }
+            if g.id().sequence().is_none() {
+                return Err(anyhow::anyhow!(
+                    "salvage requires a sequential-integer SSTable id, but {named} is a UUID-id \
+                     generation ({}) — UUID-form SSTable ids are not yet supported",
+                    g.base_name()
+                ));
+            }
+            if g.has_condition(Condition::TocMissing) {
+                barrier_absent.push(input.to_path_buf());
+            }
+        } else if listing.orphans.iter().any(|g| is_this(&g)) {
+            return Err(anyhow::anyhow!(
+                "{named} is an Orphan (Data.db missing or zero-length); salvage does not read it"
+            ));
+        } else if let Some(h) = listing
+            .hidden
             .iter()
-            .find(is_this)
-            .is_some_and(|g| g.has_condition(Condition::TocMissing))
+            .find(|h| h.path.file_name().and_then(|n| n.to_str()) == Some(named))
         {
-            barrier_absent.push(input.to_path_buf());
+            return Err(anyhow::anyhow!(
+                "{named} is hidden by transaction log {} and is not part of the live set; \
+                 salvage does not read it",
+                h.log.display()
+            ));
         }
     }
     Ok(SalvageDiscovery {
