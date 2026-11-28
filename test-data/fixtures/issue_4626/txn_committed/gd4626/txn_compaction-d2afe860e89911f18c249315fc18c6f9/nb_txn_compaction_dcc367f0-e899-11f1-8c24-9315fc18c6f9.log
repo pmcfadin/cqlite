@@ -1,0 +1,5 @@
+ADD:[/var/lib/cassandra/data/gd4626/txn_compaction-d2afe860e89911f18c249315fc18c6f9/nb-4-big-,0,8][2436736489]
+REMOVE:[/var/lib/cassandra/data/gd4626/txn_compaction-d2afe860e89911f18c249315fc18c6f9/nb-3-big-,1795588286893,8][1736859284]
+REMOVE:[/var/lib/cassandra/data/gd4626/txn_compaction-d2afe860e89911f18c249315fc18c6f9/nb-2-big-,1795588283873,8][3206408674]
+REMOVE:[/var/lib/cassandra/data/gd4626/txn_compaction-d2afe860e89911f18c249315fc18c6f9/nb-1-big-,1795588282962,8][1949738987]
+COMMIT:[,0,0][2613697770]

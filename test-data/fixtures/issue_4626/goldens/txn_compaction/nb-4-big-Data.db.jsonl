@@ -1,0 +1,5 @@
+{"table kind":"REGULAR","partition":{"key":["11"],"position":18},"rows":[{"type":"row","position":18,"liveness_info":{"tstamp":"2026-11-25T06:31:22.349862Z"},"cells":[{"name":"v","value":"txn_compaction-gen1-b"}]}]}
+{"table kind":"REGULAR","partition":{"key":["1"],"position":65},"rows":[{"type":"row","position":65,"liveness_info":{"tstamp":"2026-11-25T06:31:22.348302Z"},"cells":[{"name":"v","value":"txn_compaction-gen1-a"}]}]}
+{"table kind":"REGULAR","partition":{"key":["2"],"position":111},"rows":[{"type":"row","position":111,"liveness_info":{"tstamp":"2026-11-25T06:31:23.250814Z"},"cells":[{"name":"v","value":"txn_compaction-gen2-a"}]}]}
+{"table kind":"REGULAR","partition":{"key":["12"],"position":159},"rows":[{"type":"row","position":159,"liveness_info":{"tstamp":"2026-11-25T06:31:23.253270Z"},"cells":[{"name":"v","value":"txn_compaction-gen2-b"}]}]}
+{"table kind":"REGULAR","partition":{"key":["3"],"position":207},"rows":[{"type":"row","position":207,"liveness_info":{"tstamp":"2026-11-25T06:31:26.207562Z"},"cells":[{"name":"v","value":"txn_compaction-gen3-a"}]}]}

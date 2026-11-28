@@ -1,0 +1,2 @@
+{"table kind":"REGULAR","partition":{"key":["11"],"position":18},"rows":[{"type":"row","position":18,"liveness_info":{"tstamp":"2026-11-25T06:31:20.188507Z"},"cells":[{"name":"v","value":"uuid_mixed-gen1-b"}]}]}
+{"table kind":"REGULAR","partition":{"key":["1"],"position":61},"rows":[{"type":"row","position":61,"liveness_info":{"tstamp":"2026-11-25T06:31:20.181242Z"},"cells":[{"name":"v","value":"uuid_mixed-gen1-a"}]}]}
