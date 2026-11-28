@@ -414,10 +414,9 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
         ));
     }
 
-    // Overlap-safety gate for tombstone purging (#921 finding 1): map the
-    // explicit `--major` opt-in to `purge_safe`. Default (flag absent) is
-    // conservative — see `compact_purge_safe`.
+    // Overlap-safety gate (#921 finding 1): `--major` is the explicit opt-in; default is conservative.
     let purge_safe = compact_purge_safe(args);
+    let anchor = super::compact_reclaim::existing_anchor(&args.output); // #4666
     let report = cqlite_core::storage::write_engine::merge::compact_sstables_with_registry(
         inputs,
         &args.output,
@@ -430,7 +429,7 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
     )
     .await
     .with_context(|| "compaction failed")?;
-
+    super::compact_reclaim::reclaim_after_durable(&report, &anchor)?; // #4666
     Ok(CompactResult {
         output_path: report.output.data_path,
         input_files: report.stats.input_files,

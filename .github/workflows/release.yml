@@ -5,6 +5,21 @@ on:
   push:
     tags:
       - 'v*'
+  # Complete an EXISTING release tag whose original run failed part-way (e.g.
+  # v0.19.0, run 45949384443). Every job checks out refs/tags/<tag>, so the code
+  # built is the tag's code; only this workflow file comes from the dispatched
+  # ref. dry_run (default true) runs the builds but skips every publish/upload.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build and complete (e.g. v0.19.0)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Build only; skip asset upload, crates.io, Homebrew and release-notes edit'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -20,10 +35,11 @@ jobs:
   # a partial, irreversible publish to an immutable registry.
   preflight:
     name: Release preflight
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/release-preflight.yml
     with:
-      version: ${{ github.ref_name }}
+      version: ${{ inputs.tag || github.ref_name }}
+      ref: refs/tags/${{ inputs.tag || github.ref_name }}
 
   build-cli:
     name: Build CLI (${{ matrix.target }})
@@ -47,11 +63,14 @@ jobs:
             os: ubuntu-24.04
             exe_suffix: ""
             use_cross: true
-          # Windows builds use cross-compilation on Ubuntu
+          # Windows builds cross-compile on the Ubuntu host with apt mingw-w64
+          # (posix flavour, 13.x). NOT under cross: the cross 0.2.5 image ships
+          # an old mingw without libsynchronization.a, which Rust's windows-gnu
+          # std links (run 45949384443: `cannot find -lsynchronization`).
           - target: x86_64-pc-windows-gnu
             os: ubuntu-24.04
             exe_suffix: ".exe"
-            use_cross: true
+            use_cross: false
           # macOS builds run natively on macOS runners
           - target: x86_64-apple-darwin
             os: macos-15
@@ -65,15 +84,50 @@ jobs:
 
     steps:
     - uses: actions/checkout@v5
-
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
       with:
+        ref: refs/tags/${{ inputs.tag || github.ref_name }}
+
+    # Release builds use the repository's pinned toolchain (rust-toolchain.toml),
+    # the one the gate tests -- never floating stable. rust-toolchain.toml stays
+    # in place so rustup/cross resolve the same channel.
+    - name: Read pinned Rust channel
+      id: toolchain
+      shell: bash
+      run: |
+        channel="$(sed -n 's/^channel *= *"\(.*\)".*/\1/p' rust-toolchain.toml | head -n1)"
+        if [ -z "$channel" ]; then
+          echo "::error::no channel found in rust-toolchain.toml"
+          exit 1
+        fi
+        echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+    - name: Install Rust (pinned channel)
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ steps.toolchain.outputs.channel }}
         targets: ${{ matrix.target }}
 
-    # Override rust-toolchain.toml to use stable for release builds
-    - name: Override Rust toolchain
-      run: rm -f rust-toolchain.toml
+    - name: Ensure matrix target on the pinned channel
+      shell: bash
+      env:
+        CHANNEL: ${{ steps.toolchain.outputs.channel }}
+        TARGET: ${{ matrix.target }}
+      run: |
+        rustup target add --toolchain "$CHANNEL" "$TARGET"
+        rustc --version --verbose
+
+    - name: Install mingw-w64 (Windows target)
+      if: matrix.target == 'x86_64-pc-windows-gnu'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix
+        sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+        sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+        # Fail fast, with a clear message, if this mingw lacks the import lib
+        # Rust's windows-gnu std needs (-lsynchronization).
+        lib="$(x86_64-w64-mingw32-gcc -print-file-name=libsynchronization.a)"
+        case "$lib" in /*) ls -l "$lib" ;; *) echo "::error::mingw-w64 lacks libsynchronization.a"; exit 1 ;; esac
 
     - name: Normalize PATH for macOS (prepend ~/.cargo/bin so real cargo wins over rustup-init)
       if: runner.os == 'macOS'
@@ -91,7 +145,8 @@ jobs:
 
     - name: Install cross (Linux only)
       if: matrix.use_cross
-      run: cargo install cross
+      # Pinned to match the 0.2.5 images and to build on the pinned toolchain.
+      run: cargo install cross --locked --version 0.2.5
 
     - name: Build CLI
       shell: bash
@@ -125,7 +180,9 @@ jobs:
         fi
         cat "${file}.sha256"
 
+    # Tag push: unchanged (creates the release if absent, uploads both files).
     - name: Upload CLI artifact + checksum
+      if: github.event_name != 'workflow_dispatch'
       uses: softprops/action-gh-release@v3
       with:
         files: |
@@ -133,6 +190,47 @@ jobs:
           ./cqlite-${{ matrix.target }}.${{ contains(matrix.target, 'windows') && 'zip' || 'tar.gz' }}.sha256
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # Dispatch completion of an existing release: upload only what is missing.
+    # If this target's archive is already on the release, skip archive AND
+    # sidecar (a rebuilt archive would not match the existing hash). Otherwise
+    # upload both, clobbering only this workflow's own (possibly orphaned)
+    # sidecar. Other workflows' assets are never touched or deleted.
+    - name: Upload missing CLI assets (dispatch)
+      if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
+      shell: bash
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TAG: ${{ inputs.tag }}
+        TARGET: ${{ matrix.target }}
+      run: |
+        set -euo pipefail
+        case "$TARGET" in *windows*) ext=zip ;; *) ext=tar.gz ;; esac
+        archive="cqlite-${TARGET}.${ext}"
+        sidecar="${archive}.sha256"
+        assets="$(gh release view "$TAG" --json assets -q '.assets[].name')"
+        has_archive=false; has_sidecar=false
+        printf '%s\n' "$assets" | grep -Fxq "$archive" && has_archive=true
+        printf '%s\n' "$assets" | grep -Fxq "$sidecar" && has_sidecar=true
+        if [ "$has_archive" = false ]; then
+          # Missing archive: publish the fresh build with its matching sidecar.
+          gh release upload "$TAG" "./$archive" "./$sidecar" --clobber
+        elif [ "$has_sidecar" = false ]; then
+          # Archive published, sidecar missing: hash the PUBLISHED bytes (rebuilds
+          # are not byte-reproducible) and upload only the sidecar.
+          dl="$(mktemp -d)"
+          gh release download "$TAG" --pattern "$archive" --dir "$dl"
+          # Portable: sha256sum on Linux, shasum on macOS (same as the build step).
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$dl" && sha256sum "$archive" > "$sidecar")
+          else
+            (cd "$dl" && shasum -a 256 "$archive" > "$sidecar")
+          fi
+          cat "$dl/$sidecar"
+          gh release upload "$TAG" "$dl/$sidecar"
+        else
+          echo "::notice::$archive and $sidecar already on release $TAG; nothing to do"
+        fi
 
   # Append the changelog + hosted API-docs links to the auto-generated release
   # notes. Runs once per tag (no matrix) so the body is set a single time (#563).
@@ -142,16 +240,37 @@ jobs:
     needs: build-cli
     steps:
     - uses: actions/checkout@v5
+      with:
+        ref: refs/tags/${{ inputs.tag || github.ref_name }}
+    # Idempotent: the links block carries a marker; if the release body already
+    # has it (a re-run or a completion dispatch), nothing is appended again.
+    - name: Check whether the links are already in the release body
+      id: marker
+      if: (github.event_name != 'workflow_dispatch' || !inputs.dry_run)
+      shell: bash
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TAG: ${{ inputs.tag || github.ref_name }}
+      run: |
+        set -euo pipefail
+        if gh release view "$TAG" --json body -q .body | grep -Fq 'API docs for this release:'; then
+          echo "present=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "present=false" >> "$GITHUB_OUTPUT"
+        fi
     - name: Update release body
+      if: (github.event_name != 'workflow_dispatch' || !inputs.dry_run) && steps.marker.outputs.present != 'true'
       uses: softprops/action-gh-release@v3
       with:
-        generate_release_notes: true
+        tag_name: ${{ inputs.tag || github.ref_name }}
+        # The completion dispatch targets a release whose notes already exist.
+        generate_release_notes: ${{ github.event_name != 'workflow_dispatch' }}
         append_body: true
         body: |
 
           ---
-          📖 **API docs for this release:** https://pmcfadin.github.io/cqlite/${{ github.ref_name }}/
-          📋 **Changelog:** see [CHANGELOG.md](https://github.com/pmcfadin/cqlite/blob/${{ github.ref_name }}/CHANGELOG.md)
+          📖 **API docs for this release:** https://pmcfadin.github.io/cqlite/${{ inputs.tag || github.ref_name }}/
+          📋 **Changelog:** see [CHANGELOG.md](https://github.com/pmcfadin/cqlite/blob/${{ inputs.tag || github.ref_name }}/CHANGELOG.md)
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -242,21 +361,37 @@ jobs:
     name: Publish to crates.io
     needs: [preflight, build-cli]
     runs-on: ubuntu-24.04
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
       id-token: write
     steps:
     - uses: actions/checkout@v5
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      with:
+        ref: refs/tags/${{ inputs.tag || github.ref_name }}
+    - name: Read pinned Rust channel
+      id: toolchain
+      shell: bash
+      run: |
+        channel="$(sed -n 's/^channel *= *"\(.*\)".*/\1/p' rust-toolchain.toml | head -n1)"
+        if [ -z "$channel" ]; then
+          echo "::error::no channel found in rust-toolchain.toml"
+          exit 1
+        fi
+        echo "channel=$channel" >> "$GITHUB_OUTPUT"
+    - name: Install Rust (pinned channel)
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ steps.toolchain.outputs.channel }}
     - name: Authenticate to crates.io (OIDC trusted publishing)
+      if: (github.event_name != 'workflow_dispatch' || !inputs.dry_run)
       uses: rust-lang/crates-io-auth-action@v1
       id: auth
     - name: Publish crates (core before cli, idempotent)
       env:
         CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        TAG: ${{ github.ref_name }}
+        TAG: ${{ inputs.tag || github.ref_name }}
+        DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
       run: |
         set -euo pipefail
         VER="${TAG#v}"
@@ -271,13 +406,21 @@ jobs:
           exit 1
         fi
 
-        on_crates_io() {  # $1=crate -> 0 if version $VER already published
-          [ "$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" \
-            "https://crates.io/api/v1/crates/$1/$VER")" = "200" ]
+        on_crates_io() {  # $1=crate -> 0 if published, 1 if absent; other HTTP codes abort
+          local code
+          code="$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" \
+            "https://crates.io/api/v1/crates/$1/$VER")"
+          case "$code" in
+            200) return 0 ;;
+            404) return 1 ;;
+            *) echo "::error::unexpected HTTP $code probing crates.io for $1 $VER"; exit 1 ;;
+          esac
         }
         publish() {  # $1=package
           if on_crates_io "$1"; then
             echo "✓ $1 $VER already on crates.io — skipping"
+          elif [ "$DRY_RUN" = "true" ]; then
+            echo "dry_run: would publish $1 $VER (skipped)"
           else
             echo "→ publishing $1 $VER"
             cargo publish --package "$1"
@@ -285,11 +428,13 @@ jobs:
         }
 
         publish cqlite-core
-        echo "waiting for cqlite-core $VER on the index..."
-        for i in $(seq 1 20); do
-          on_crates_io cqlite-core && break
-          sleep 15
-        done
+        if [ "$DRY_RUN" != "true" ]; then
+          echo "waiting for cqlite-core $VER on the index..."
+          for i in $(seq 1 20); do
+            on_crates_io cqlite-core && break
+            sleep 15
+          done
+        fi
         publish cqlite-cli
 
   # Refresh the Homebrew tap (pmcfadin/homebrew-cqlite) so `brew install
@@ -303,10 +448,14 @@ jobs:
     name: Update Homebrew tap
     needs: build-cli
     runs-on: ubuntu-24.04
-    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    # dry_run skips the whole job: it needs the (not yet uploaded) sidecars and
+    # a push token. A real run is safe to repeat (unchanged formula => no commit).
+    if: (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) && (github.event_name != 'workflow_dispatch' || !inputs.dry_run) && !contains(inputs.tag || github.ref_name, '-')
     steps:
     - name: Check out cqlite (for the formula generator)
       uses: actions/checkout@v5
+      with:
+        ref: refs/tags/${{ inputs.tag || github.ref_name }}
 
     - name: Check out the Homebrew tap
       uses: actions/checkout@v5
@@ -317,7 +466,7 @@ jobs:
 
     - name: Regenerate the formula for this release
       env:
-        TAG: ${{ github.ref_name }}
+        TAG: ${{ inputs.tag || github.ref_name }}
       run: |
         set -euo pipefail
         VERSION="${TAG#v}"
@@ -327,7 +476,7 @@ jobs:
     - name: Commit and push the updated formula
       working-directory: homebrew-cqlite
       env:
-        TAG: ${{ github.ref_name }}
+        TAG: ${{ inputs.tag || github.ref_name }}
       run: |
         set -euo pipefail
         git config user.name "github-actions[bot]"

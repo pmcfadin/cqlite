@@ -43,6 +43,7 @@ mod simple;
 pub mod staged_publish;
 mod statistics;
 
+pub use atomic_file::fsync_dir;
 pub use components::rebuild_components;
 
 use serde::{Deserialize, Serialize};
