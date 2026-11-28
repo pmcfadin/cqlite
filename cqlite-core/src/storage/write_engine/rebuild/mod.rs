@@ -37,6 +37,7 @@
 // exist in every `write-support` build; the rest of rebuild keeps the `not(tombstones)` gate its
 // declaration in `write_engine/mod.rs` used to impose on the whole module.
 mod atomic_file;
+pub mod no_clobber;
 #[cfg(not(feature = "tombstones"))]
 mod boundaries;
 #[cfg(not(feature = "tombstones"))]
