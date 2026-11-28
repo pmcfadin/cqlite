@@ -43,6 +43,8 @@ mod boundaries;
 mod components;
 #[cfg(not(feature = "tombstones"))]
 mod decode;
+#[cfg(not(feature = "tombstones"))]
+mod generation_input;
 pub mod no_clobber;
 #[cfg(not(feature = "tombstones"))]
 mod partition_stats;
@@ -50,13 +52,15 @@ mod partition_stats;
 #[cfg(not(feature = "tombstones"))]
 mod publish;
 #[cfg(not(feature = "tombstones"))]
+mod refusals;
+#[cfg(not(feature = "tombstones"))]
 mod simple;
 pub mod staged_publish;
 #[cfg(not(feature = "tombstones"))]
 mod statistics;
 
 #[cfg(not(feature = "tombstones"))]
-pub use components::rebuild_components;
+pub use components::{rebuild_components, rebuild_generation};
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -205,6 +209,10 @@ pub enum RefusalReason {
     /// original `Statistics.db` is gone), and the remedy names restoring it
     /// FIRST, with `salvage` (#4196) as the fallback.
     ReencodeMismatch,
+    /// The generation's descriptor version is below the supported floor (`ma`-`me`, or a non-`da`
+    /// BTI version). Refused from the filename before any component is opened (issue #4626, GD1);
+    /// it is never a field classification, so no `lost` entry exists for it.
+    UnsupportedVersion,
 }
 
 /// A refusal: nothing was written (design D3). Distinct from a usage error
@@ -236,6 +244,12 @@ pub struct RebuildReport {
     /// `"nb"` for BIG input, `"da"` for BTI.
     pub format: String,
     pub compressed_input: bool,
+    /// The generation module's conditions on the INPUT (issue #4626, GD2): `TocMissing` when the
+    /// generation was rebuilt without its `TOC.txt`, `Orphan` for an entry listed and not
+    /// rebuilt. Absent from the JSON when the input is a plain healthy generation, so every
+    /// existing manifest is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_conditions: Vec<String>,
     pub requested: Vec<String>,
     pub regenerated: Vec<String>,
     pub skipped_not_applicable: Vec<SkippedComponent>,
@@ -290,6 +304,12 @@ impl RebuildReport {
             self.format, self.compressed_input
         ));
         out.push_str(&format!("requested: {}\n", self.requested.join(", ")));
+        if !self.input_conditions.is_empty() {
+            out.push_str(&format!(
+                "input_conditions: {}\n",
+                self.input_conditions.join(", ")
+            ));
+        }
         if let Some(refusal) = &self.refused {
             out.push_str(&format!("REFUSED: {}\n", refusal.reason.manifest_label()));
             out.push_str(&format!("remedy: {}\n", refusal.remedy));
@@ -329,11 +349,69 @@ impl RebuildReport {
     }
 }
 
+impl RebuildReport {
+    /// The manifest entry for a generation the listing named but this run did not open (issue
+    /// #4626): a below-floor generation refused as [`RefusalReason::UnsupportedVersion`] (GD1,
+    /// GD4), or an Orphan reported and skipped (GD4). `output` is empty for an Orphan, which
+    /// writes nothing.
+    pub fn for_unopened_generation(
+        generation: &crate::storage::sstable::generation::Generation,
+        input: &std::path::Path,
+        output: &std::path::Path,
+        requested: &[Component],
+        refused: Option<Refusal>,
+    ) -> Self {
+        use crate::storage::sstable::version_gate::SsTableFormat;
+        Self {
+            input: input.display().to_string(),
+            output: output.display().to_string(),
+            format: match generation.format() {
+                SsTableFormat::Big => "nb",
+                SsTableFormat::Bti => "da",
+            }
+            .to_string(),
+            compressed_input: generation.component_path("CompressionInfo.db").is_some(),
+            input_conditions: generation
+                .conditions()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            requested: requested
+                .iter()
+                .map(|c| c.manifest_label().to_string())
+                .collect(),
+            regenerated: Vec::new(),
+            skipped_not_applicable: Vec::new(),
+            classification: BTreeMap::new(),
+            refused,
+            rolled_back: false,
+            now: chrono::Utc::now().to_rfc3339(),
+            cqlite_version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+
+    /// The refusal for a generation below the version floor, naming the version and the floor.
+    pub fn unsupported_version_refusal(
+        generation: &crate::storage::sstable::generation::Generation,
+    ) -> Option<Refusal> {
+        generation.below_floor().map(|below| Refusal {
+            reason: RefusalReason::UnsupportedVersion,
+            remedy: format!(
+                "{} is below the supported floor {} (CQLite supports Cassandra 5.0 only); rebuild \
+                 refuses it before opening any component",
+                below.version, below.floor
+            ),
+            offset: None,
+        })
+    }
+}
+
 impl RefusalReason {
     pub fn manifest_label(self) -> &'static str {
         match self {
             RefusalReason::DataCorrupt => "data-corrupt",
             RefusalReason::ReencodeMismatch => "reencode-mismatch",
+            RefusalReason::UnsupportedVersion => "unsupported-version",
         }
     }
 }
@@ -382,6 +460,7 @@ mod tests {
             output: "out".to_string(),
             format: "nb".to_string(),
             compressed_input: false,
+            input_conditions: Vec::new(),
             requested: vec!["digest".to_string()],
             regenerated: vec!["digest".to_string()],
             skipped_not_applicable: Vec::new(),
@@ -403,6 +482,7 @@ mod tests {
             output: "out".to_string(),
             format: "nb".to_string(),
             compressed_input: true,
+            input_conditions: Vec::new(),
             requested: vec!["index".to_string()],
             regenerated: Vec::new(),
             skipped_not_applicable: Vec::new(),

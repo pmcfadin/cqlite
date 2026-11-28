@@ -43,22 +43,24 @@
 //! rests on.
 
 use super::partition_stats::fold_partition_statistics;
+use super::refusals::{data_corrupt_refusal, reencode_mismatch_refusal};
 use super::{
-    boundaries, decode, simple, statistics, Component, FieldProvenance, RebuildOptions,
-    RebuildReport, Refusal, RefusalReason, SkippedComponent,
+    boundaries, decode, generation_input, simple, statistics, Component, FieldProvenance,
+    RebuildOptions, RebuildReport, Refusal, SkippedComponent,
 };
 use crate::error::{Error, Result};
 use crate::schema::TableSchema;
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::directory::types::SSTableComponent;
-use crate::storage::sstable::reader::{extract_sstable_base_name, SSTableReader};
-use crate::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
+use crate::storage::sstable::generation::Generation;
+use crate::storage::sstable::reader::SSTableReader;
+use crate::storage::sstable::version_gate::SsTableFormat;
 use crate::storage::sstable::writer::data_writer::PartitionEmitCounts;
 use crate::storage::sstable::writer::{
     DataWriter, FilterWriter, IndexWriter, SSTableWriter, StatisticsMetadata, SummaryWriter,
 };
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 async fn open_reader(input: &Path) -> Result<SSTableReader> {
     use crate::{config::DiskAccessMode, platform::Platform, Config};
@@ -94,62 +96,11 @@ fn cleanup_partial_output(out_dir: &Path, base: &str) {
     let _ = std::fs::remove_file(out_dir.join(format!("{base}-Index.db")));
 }
 
-fn data_corrupt_refusal(detail: impl std::fmt::Display, offset: Option<u64>) -> Refusal {
-    Refusal {
-        reason: RefusalReason::DataCorrupt,
-        remedy: format!(
-            "Data.db cannot be trusted as the source of truth: {detail} — remedy: cqlite \
-             salvage (issue #4196) to recover a fresh generation from what is still decodable"
-        ),
-        offset,
-    }
-}
-
-/// Refuse because re-encoding a partition did not reproduce its ACTUAL
-/// on-disk byte span (issue #4197 spec R2), so every promoted-index offset
-/// derived from that re-encode is untrustworthy.
-///
-/// This is deliberately NOT [`RefusalReason::DataCorrupt`]: `Data.db` decoded
-/// cleanly and may well be perfectly healthy — what failed is rebuild's
-/// ability to REPRODUCE its encoding, overwhelmingly because the
-/// whole-SSTable `EncodingStats` baseline could not be recovered from the
-/// original `Statistics.db` (see the module doc). Reporting corruption for a
-/// healthy file would send the operator to `salvage` for nothing.
-fn reencode_mismatch_refusal(
-    offset: u64,
-    on_disk_span: u64,
-    reencoded_span: u64,
-    baseline_provenance: FieldProvenance,
-) -> Refusal {
-    Refusal {
-        reason: RefusalReason::ReencodeMismatch,
-        remedy: format!(
-            "the partition at Data.db offset {offset} occupies {on_disk_span} bytes on disk but \
-             re-encodes to {reencoded_span} bytes, so every promoted-index offset derived from \
-             it would be wrong (EncodingStats baseline provenance: {}) — remedy: restore this \
-             generation's original Statistics.db (its SerializationHeader carries the \
-             authoritative delta-encoding baseline) and re-run; if it is gone for good, cqlite \
-             salvage (issue #4196) can write a fresh, self-consistent generation instead",
-            baseline_provenance.manifest_label()
-        ),
-        offset: Some(offset),
-    }
-}
-
-/// The `Statistics.db` this run reads recovered metadata FROM (spec R4.2):
-/// the caller's explicit "renamed aside" override when given, else the
-/// input's own expected sibling path. Resolved ONCE so the `EncodingStats`
-/// baseline (pass 0) and the repair fields (`write_statistics_component`)
-/// can never read two different files.
-fn statistics_source_path(dir: &Path, base: &str, options: &RebuildOptions) -> PathBuf {
-    options
-        .statistics_recovery_source
-        .clone()
-        .unwrap_or_else(|| dir.join(format!("{base}-Statistics.db")))
-}
-
 /// Regenerate `requested` derived components of `data_db_path` (design D1;
-/// spec R1-R6). Opens `Data.db` READ-ONLY and never modifies it or any
+/// spec R1-R6). The path is resolved through the generation module first (issue #4626): a
+/// below-floor generation is `Err(UnsupportedVersion)`, an Orphan, a file a transaction log hides
+/// or an inconsistent directory is refused by name, and a `TocMissing` generation is rebuilt.
+/// Opens `Data.db` READ-ONLY and never modifies it or any
 /// component this run does not itself write to `options.out_dir`.
 ///
 /// Returns `Err` only for a USAGE error (an empty `requested`, or `index`
@@ -162,7 +113,19 @@ pub async fn rebuild_components(
     requested: &[Component],
     options: &RebuildOptions,
 ) -> Result<RebuildReport> {
-    super::publish::rebuild_components_published(data_db_path, schema, requested, options).await
+    let generation = generation_input::resolve_input(data_db_path)?;
+    rebuild_generation(&generation, schema, requested, options).await
+}
+
+/// [`rebuild_components`] for a generation the caller already listed (the table-directory run of
+/// `cqlite rebuild` lists once and rebuilds each live generation).
+pub async fn rebuild_generation(
+    generation: &Generation,
+    schema: &TableSchema,
+    requested: &[Component],
+    options: &RebuildOptions,
+) -> Result<RebuildReport> {
+    super::publish::rebuild_generation_published(generation, schema, requested, options).await
 }
 
 /// [`rebuild_components`], additionally handing back the `StatisticsMetadata`
@@ -176,8 +139,20 @@ pub async fn rebuild_components(
 /// F6) cannot be asserted from the output bytes of the format the whole
 /// committed corpus uses. Crate-internal on purpose: it is a test seam for
 /// an in-crate assertion, not a second public entry point.
+#[cfg(test)]
 pub(super) async fn rebuild_components_capturing_stats(
     data_db_path: &Path,
+    schema: &TableSchema,
+    requested: &[Component],
+    options: &RebuildOptions,
+    stats_acc: &mut StatisticsMetadata,
+) -> Result<RebuildReport> {
+    let generation = generation_input::resolve_input(data_db_path)?;
+    rebuild_generation_capturing_stats(&generation, schema, requested, options, stats_acc).await
+}
+
+pub(super) async fn rebuild_generation_capturing_stats(
+    generation: &Generation,
     schema: &TableSchema,
     requested: &[Component],
     options: &RebuildOptions,
@@ -188,8 +163,12 @@ pub(super) async fn rebuild_components_capturing_stats(
             "rebuild_components: `requested` must name at least one component".to_string(),
         ));
     }
-    let descriptor = SsTableDescriptor::parse(data_db_path)?;
-    let is_bti = descriptor.format == SsTableFormat::Bti;
+    // The floor, from the descriptor alone, before any component is opened (GD1).
+    generation_input::check_floor(generation)?;
+    let data_db_path = generation
+        .component_path("Data.db")
+        .ok_or_else(|| Error::InvalidInput(format!("{} has no Data.db", generation.base_name())))?;
+    let is_bti = generation.format() == SsTableFormat::Bti;
     if is_bti && requested.contains(&Component::Index) {
         return Err(Error::UnsupportedFormat(
             "BTI (`da`) Partitions.db/Rows.db rebuild is not implemented in this change (issue \
@@ -199,19 +178,13 @@ pub(super) async fn rebuild_components_capturing_stats(
         ));
     }
 
-    let dir = data_db_path.parent().ok_or_else(|| {
-        Error::InvalidInput(format!(
-            "input path has no parent directory: {}",
-            data_db_path.display()
-        ))
-    })?;
-    let base = extract_sstable_base_name(data_db_path).ok_or_else(|| {
-        Error::InvalidInput(format!(
-            "cannot derive an SSTable base name from {}",
-            data_db_path.display()
-        ))
-    })?;
-    let compressed_input = dir.join(format!("{base}-CompressionInfo.db")).exists();
+    let compressed_input = generation.component_path("CompressionInfo.db").is_some();
+    let input_conditions: Vec<String> = generation
+        .conditions()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let base = generation.base_name();
     let format_label = if is_bti { "da" } else { "nb" };
     let now = chrono::Utc::now().to_rfc3339();
     let cqlite_version = env!("CARGO_PKG_VERSION").to_string();
@@ -225,6 +198,7 @@ pub(super) async fn rebuild_components_capturing_stats(
         output: options.out_dir.display().to_string(),
         format: format_label.to_string(),
         compressed_input,
+        input_conditions: input_conditions.clone(),
         requested: requested_labels.clone(),
         regenerated: Vec::new(),
         skipped_not_applicable: Vec::new(),
@@ -287,7 +261,7 @@ pub(super) async fn rebuild_components_capturing_stats(
     let want_statistics = want(Component::Statistics);
     let needs_partition_pass = want_index || want_summary || want_filter || want_statistics;
 
-    let stats_source = statistics_source_path(dir, &base, options);
+    let stats_source = generation_input::statistics_source(generation, options);
     // Provenance of the three `EncodingStats` baseline minima actually used
     // below (module doc, provenance order). `Recovered` = read from the
     // original `Statistics.db`'s SerializationHeader; `Lost` = that file was
@@ -324,7 +298,7 @@ pub(super) async fn rebuild_components_capturing_stats(
         // for why this beats (and is not merely nicer than) any derivation
         // from `Data.db`'s content.
         let recovered_baseline = if needs_baseline {
-            statistics::recover_encoding_stats_baseline(&stats_source)
+            statistics::recover_encoding_stats_baseline(stats_source.as_ref())
         } else {
             None
         };
@@ -719,7 +693,7 @@ pub(super) async fn rebuild_components_capturing_stats(
 
     if want_statistics {
         statistics::write_statistics_component(
-            &stats_source,
+            stats_source.as_ref(),
             &base,
             options,
             schema,
@@ -746,7 +720,7 @@ pub(super) async fn rebuild_components_capturing_stats(
     let want_toc = want(Component::Toc);
     let regenerated: HashSet<String> = report.regenerated.iter().cloned().collect();
     let mut present =
-        simple::copy_untouched_components(dir, &options.out_dir, &base, |component| {
+        simple::copy_untouched_components(generation, &options.out_dir, |component| {
             match component {
                 SSTableComponent::TOC => want_toc,
                 SSTableComponent::Index => regenerated.contains("index"),

@@ -6,13 +6,11 @@
 
 use super::{Component, FieldProvenance, RebuildOptions, RebuildReport};
 use crate::error::Result;
-use crate::parser::repair_metadata::{parse_repair_metadata, RepairField};
+use crate::parser::repair_metadata::RepairField;
 use crate::schema::TableSchema;
-use crate::storage::sstable::statistics_reader::integrity::read_checked_statistics;
-use crate::storage::sstable::version_gate::VersionGates;
+use crate::storage::sstable::generation::Generation;
 use crate::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
 use std::collections::BTreeMap;
-use std::path::Path;
 
 /// One partition's recovered repair-coordination fields (spec R4.2/R4.3),
 /// each with its own [`FieldProvenance`] — `recovered` only when the
@@ -36,38 +34,30 @@ impl RecoveredRepairState {
     }
 }
 
-/// Read `repairedAt`/`pendingRepair`/`isTransient` from `stats_path` (design
-/// D2's Statistics.db row; spec R4.2/R4.3). `stats_path` is EITHER the
-/// input's own expected sibling `Statistics.db`, or an explicit
-/// `--statistics-recovery-source`-style override naming a renamed-aside
-/// file (R4.2) — this function does not care which, it only reads bytes at
-/// the path it is given.
+/// Read `repairedAt`/`pendingRepair`/`isTransient` from `source`'s trusted `Statistics.db` (design
+/// D2's Statistics.db row; spec R4.2/R4.3), through the generation module's accessor (issue #4626,
+/// GD3). `source` is EITHER the input's own generation, or the generation the module lists for an
+/// explicit `--statistics-recovery-source`-style override naming a renamed-aside file (R4.2); this
+/// function does not care which.
 ///
-/// Never guesses: a file that cannot be read, or whose repair fields are
-/// genuinely `Unparsed` (an unmodeled clustering comparator — see
-/// [`crate::parser::repair_metadata`]'s module doc), is [`FieldProvenance::Lost`],
-/// never silently reported as `recovered` with a default value (spec
-/// R4.3's core assertion).
-pub(super) fn recover_repair_state(stats_path: &Path) -> RecoveredRepairState {
-    // #4612: a truncated/corrupt file is unreadable (-> `lost`), never a partial parse.
-    let Ok(bytes) = read_checked_statistics(stats_path) else {
+/// Never guesses: no source, an absent, unreadable or damaged file (#4612: never a partial parse),
+/// or repair fields that are genuinely `Unparsed` (an unmodeled clustering comparator, see
+/// [`crate::parser::repair_metadata`]'s module doc) is [`FieldProvenance::Lost`], never silently
+/// reported as `recovered` with a default value (spec R4.3's core assertion).
+pub(super) fn recover_repair_state(source: Option<&Generation>) -> RecoveredRepairState {
+    let Some(facts) = source.and_then(|g| g.statistics_facts().ok()) else {
         return RecoveredRepairState::lost();
     };
-    let Ok(gates) = VersionGates::from_path(stats_path) else {
-        return RecoveredRepairState::lost();
-    };
-    let Ok(md) = parse_repair_metadata(&bytes, Some(&gates)) else {
-        return RecoveredRepairState::lost();
-    };
+    let md = &facts.repair;
     if !md.repaired_at_decoded {
         return RecoveredRepairState::lost();
     }
-    let (pending_repair, pending_ok) = match md.pending_repair {
-        RepairField::Decoded(v) => (v, true),
+    let (pending_repair, pending_ok) = match &md.pending_repair {
+        RepairField::Decoded(v) => (*v, true),
         RepairField::Unparsed => (None, false),
     };
-    let (is_transient, transient_ok) = match md.is_transient {
-        RepairField::Decoded(v) => (v, true),
+    let (is_transient, transient_ok) = match &md.is_transient {
+        RepairField::Decoded(v) => (*v, true),
         RepairField::Unparsed => (false, false),
     };
     if !pending_ok || !transient_ok {
@@ -94,7 +84,7 @@ pub(super) struct RecoveredBaseline {
 }
 
 /// Read the authoritative `EncodingStats` baseline triple out of
-/// `stats_path`'s `SerializationHeader` — the three whole-SSTable minima
+/// `source`'s trusted `SerializationHeader` — the three whole-SSTable minima
 /// Cassandra delta-encoded EVERY row's timestamp/TTL/local-deletion-time
 /// against when it wrote the sibling (and, for rebuild, UNCHANGED) `Data.db`.
 ///
@@ -118,10 +108,12 @@ pub(super) struct RecoveredBaseline {
 /// regenerate a MISSING `Statistics.db`, so the fallback must stay; see
 /// `components`'s module doc for why circularity, not mere imprecision, is
 /// the reason).
-pub(super) fn recover_encoding_stats_baseline(stats_path: &Path) -> Option<RecoveredBaseline> {
-    let bytes = read_checked_statistics(stats_path).ok()?; // #4612: strict, as above
+pub(super) fn recover_encoding_stats_baseline(
+    source: Option<&Generation>,
+) -> Option<RecoveredBaseline> {
+    // #4612: the accessor is strict (integrity check, then one parse), as above.
     let (min_timestamp, min_local_deletion_time, min_ttl) =
-        crate::parser::enhanced_statistics_parser::read_encoding_stats_baseline(&bytes)?;
+        source?.encoding_stats_baseline().ok()??;
     // A value outside `i32` cannot be the baseline Cassandra wrote:
     // `EncodingStats.Serializer` round-trips both of these through
     // `writeUnsignedVInt32`/`readUnsignedVInt32`, whose `checkedCast`
@@ -174,8 +166,8 @@ pub(super) fn min_index_interval() -> (u32, FieldProvenance) {
 /// Write the regenerated `Statistics.db` and record its per-field
 /// provenance (design D2/D5; spec R4).
 ///
-/// `stats_path` is the ALREADY-RESOLVED recovery source
-/// (`components::statistics_source_path`) — the same file pass 0 read the
+/// `source` is the ALREADY-RESOLVED recovery source
+/// (`generation_input::statistics_source`) — the same file pass 0 read the
 /// `EncodingStats` baseline from, so the repair fields and the baseline can
 /// never come from two different `Statistics.db`s.
 ///
@@ -190,7 +182,7 @@ pub(super) fn min_index_interval() -> (u32, FieldProvenance) {
 // satisfied.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn write_statistics_component(
-    stats_path: &Path,
+    source: Option<&Generation>,
     base: &str,
     options: &RebuildOptions,
     schema: &TableSchema,
@@ -199,7 +191,7 @@ pub(super) fn write_statistics_component(
     stats_acc: &mut StatisticsMetadata,
     report: &mut RebuildReport,
 ) -> Result<()> {
-    let repair = recover_repair_state(stats_path);
+    let repair = recover_repair_state(source);
     stats_acc.set_repair_state(
         repair.repaired_at,
         repair.pending_repair,
@@ -322,8 +314,17 @@ mod tests {
 
     #[test]
     fn recover_repair_state_is_lost_when_file_absent() {
-        let missing = Path::new("/nonexistent/nb-1-big-Statistics.db");
-        let state = recover_repair_state(missing);
+        // A generation with no `Statistics.db` beside its (placeholder) `Data.db`.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("nb-1-big-Data.db"), b"x").unwrap();
+        let listing = crate::storage::sstable::generation::list_generations(
+            dir.path(),
+            &crate::storage::sstable::generation::Scope::Live,
+            crate::storage::sstable::generation::TocPolicy::Accept,
+        )
+        .unwrap();
+        let state = recover_repair_state(listing.live.first());
+        assert_eq!(recover_repair_state(None).provenance, FieldProvenance::Lost);
         assert_eq!(state.provenance, FieldProvenance::Lost);
         assert_eq!(state.repaired_at, 0);
         assert_eq!(state.pending_repair, None);
