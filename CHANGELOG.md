@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.19.1] - 2026-11-28
+
+A patch release: v0.19.0 plus one data-loss fix and one release-workflow fix, nothing else. Page:
+the [release page](https://pmcfadin.github.io/cqlite/releases/v0-19-1/).
+
+### Fixed
+
+- `cqlite compact --major` could delete a fully-expired input before its output was published, so a
+  failed or killed run lost the input (#4666). Inputs are now removed only after the output is
+  durable (every file fsynced, `TOC.txt` last, then the output directory).
+
+### CI
+
+- Release builds use the pinned toolchain from `rust-toolchain.toml` instead of floating stable
+  (#4648).
+
 ## [v0.19.0] - 2026-11-27
 
 The SSTable utility release: detect, diagnose, compare, recover and export. Every new verb is
