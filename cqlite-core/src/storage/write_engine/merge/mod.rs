@@ -1495,29 +1495,11 @@ pub async fn compact_sstables_with_registry(
     let mut stats = merger.merge(&mut writer)?;
     let output = writer.finish().await?;
 
-    // Issue #1388: the merged output is now published. Reclaim the dropped-whole
-    // SSTables (never read into the merger) via the same component-delete path the
-    // WriteEngine background compaction uses for merged inputs. Deletion is
-    // best-effort: a failure leaves an invisible orphan (its TOC.txt is removed
-    // first) reclaimed on next startup, never a hard error — the output is correct.
-    //
-    // The one-shot CLI surface deletes NO merge inputs (the operator owns the input
-    // dir; the output lands in a separate `--output` dir), so `already_deleted` is
-    // EMPTY: in the degenerate all-expired case the SSTable the all-dropped guard
-    // retained as a merge input is ALSO in `dropped_whole` and IS reclaimed here
-    // (roborev #1388 Medium — closes the former "all-expired input left on disk").
-    fully_expired::reclaim_dropped_whole(&dropped_whole, &[], |dropped| {
-        if let Err(e) =
-            crate::storage::write_engine::WriteEngine::delete_sstable_files_static(dropped)
-        {
-            tracing::warn!(
-                "Failed to delete dropped-whole compaction input {:?}: {} \
-                 (output is valid; leftover is an invisible orphan)",
-                dropped,
-                e
-            );
-        }
-    });
+    // Issue #4666: NOTHING is removed here. `writer.finish()` only wrote the output; a caller
+    // that has made it durable removes the dropped-whole inputs with
+    // [`CompactReport::reclaim_dropped_inputs`] AFTER that. Removing them now would lose their
+    // data if the caller's publish then fails or the process dies (Cassandra obsoletes originals
+    // only after the `LifecycleTransaction` commits).
     // Record the drop decision in the report/stats (issue #1388, R4), distinct from
     // the merged inputs so it is assertable from the plan, not just output absence.
     stats.dropped_whole = dropped_whole;
