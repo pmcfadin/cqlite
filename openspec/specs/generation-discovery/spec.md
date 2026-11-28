@@ -1,7 +1,7 @@
 # generation-discovery Specification
 
 ## Purpose
-TBD - created by archiving change generation-discovery. Update Purpose after archive.
+One module owns SSTable generation discovery for a table directory: which generations are Live, their ids and next-id allocation, the version floor, and cached trusted Statistics.db metadata. Verbs list through it instead of scanning directories themselves.
 
 ## Requirements
 
