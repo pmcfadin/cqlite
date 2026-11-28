@@ -126,7 +126,9 @@ pub fn write_file_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
     write_file_atomic_with(dest, |w| w.write_all(bytes))
 }
 
-pub(super) fn fsync_dir(dir: &Path) -> Result<()> {
+/// fsync a directory so its entries are durable. Unix only; on other platforms a documented no-op
+/// (std cannot open a directory there, and Rust's own std makes the same choice).
+pub fn fsync_dir(dir: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         std::fs::File::open(dir)

@@ -430,7 +430,7 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
     )
     .await
     .with_context(|| "compaction failed")?;
-    super::compact_reclaim::reclaim_after_durable(&report)?; // #4666
+    super::compact_reclaim::reclaim_after_durable(&report, &args.output)?; // #4666
     Ok(CompactResult {
         output_path: report.output.data_path,
         input_files: report.stats.input_files,
