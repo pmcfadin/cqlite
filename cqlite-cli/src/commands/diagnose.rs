@@ -224,12 +224,7 @@ fn generation_json(g: &GenerationDiagnosis) -> Value {
     if !g.conditions.is_empty() {
         m.insert(
             "conditions".into(),
-            Value::Array(
-                g.conditions
-                    .iter()
-                    .map(|c| json!(format!("{c:?}")))
-                    .collect(),
-            ),
+            Value::Array(g.conditions.iter().map(|c| json!(c.to_string())).collect()),
         );
     }
     Value::Object(m)
@@ -329,7 +324,7 @@ pub(crate) fn render_text(r: &DiagnoseReport) -> Result<String, String> {
                 "  conditions: {}\n",
                 g.conditions
                     .iter()
-                    .map(|c| format!("{c:?}"))
+                    .map(|c| c.to_string())
                     .collect::<Vec<_>>()
                     .join(", ")
             ));

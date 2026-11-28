@@ -32,15 +32,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
-use crate::parser::repair_metadata::diagnose_fields::{
-    read_cell_per_partition_stats, read_compression_ratio, read_stats_minimums,
-};
-use crate::parser::repair_metadata::{parse_repair_metadata, RepairField};
+use crate::parser::repair_metadata::RepairField;
 use crate::parser::statistics::SSTableStatistics;
 use crate::platform::Platform;
 use crate::schema::TableSchema;
 use crate::storage::sstable::generation::{
-    list_generations, Condition, DirectoryNote, Generation, Scope, TocPolicy,
+    list_generations, Condition, DirectoryNote, Generation, Scope, StatisticsFacts, TocPolicy,
 };
 use crate::storage::sstable::reader::SSTableReader;
 use crate::storage::write_engine::merge::fully_expired::is_fully_expired;
@@ -437,19 +434,12 @@ async fn diagnose_generation(
     // are the generation's trusted-metadata accessor. A failure becomes this generation's
     // `unreadable_generations` entry (R6) with the condition named in the cause.
     let named = |failure: crate::storage::sstable::generation::MetadataFailure| {
-        format!("{:?}: {failure}", failure.condition())
+        format!("{}: {failure}", failure.condition())
     };
     let stats = generation.trusted_metadata_via(read).map_err(named)?;
-    let stats_bytes = generation.trusted_statistics_bytes().map_err(named)?;
+    let facts = generation.statistics_facts_via(read).map_err(named)?;
     diagnose_loaded_generation(
-        generation,
-        data_path,
-        options,
-        gc_before,
-        config,
-        platform,
-        &stats,
-        &stats_bytes,
+        generation, data_path, options, gc_before, config, platform, &stats, &facts,
     )
     .await
     .map_err(|e| e.to_string())
@@ -465,13 +455,11 @@ async fn diagnose_loaded_generation(
     config: &Config,
     platform: Arc<Platform>,
     stats: &SSTableStatistics,
-    stats_bytes: &[u8],
+    facts: &StatisticsFacts,
 ) -> Result<(GenerationDiagnosis, Option<(i64, i64)>)> {
-    let gates = generation.version_gates();
-
-    let repair = parse_repair_metadata(stats_bytes, gates.as_ref())?;
-    let cell_per_partition = read_cell_per_partition_stats(stats_bytes)?;
-    let compression_ratio_raw = read_compression_ratio(stats_bytes)?;
+    let repair = &facts.repair;
+    let cell_per_partition = facts.cell_per_partition;
+    let compression_ratio_raw = facts.compression_ratio;
 
     let format = generation.version().to_string();
     // The generation id comes from the descriptor (spec R5.1: `Data.db` is never opened in the
@@ -493,10 +481,9 @@ async fn diagnose_loaded_generation(
 
     // The STATS component's OWN minimums (what `sstablemetadata` prints) — not the
     // serialization-header EncodingStats baselines `timestamp_stats` carries.
-    let (min_timestamp, min_local_deletion_time) =
-        read_stats_minimums(stats_bytes, gates.as_ref())?.ok_or_else(|| {
-            Error::corruption("Statistics.db carries no STATS component".to_string())
-        })?;
+    let (min_timestamp, min_local_deletion_time) = facts
+        .minimums
+        .ok_or_else(|| Error::corruption("Statistics.db carries no STATS component".to_string()))?;
     let max_timestamp = max_timestamp_field(stats);
     let estimated_partition_count = estimated_partition_count_field(stats);
 
@@ -508,7 +495,7 @@ async fn diagnose_loaded_generation(
             options.now_secs,
         );
 
-    let pending_repair = pending_repair_field(&repair);
+    let pending_repair = pending_repair_field(repair);
     let compression_ratio = compression_ratio_field(compression_ratio_raw);
 
     let fully_expired_at_now = match gc_before {

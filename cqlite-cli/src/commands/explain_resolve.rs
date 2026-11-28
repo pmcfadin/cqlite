@@ -46,6 +46,10 @@ pub(crate) fn resolve_generations(dir: &Path) -> Result<ResolvedGenerations, Str
         ));
     }
     Ok(ResolvedGenerations {
+        // The comparator's order, newest first: `SSTableIdFactory.COMPARATOR` puts every UUID id
+        // after every sequence id, so a UUID generation is the "newest". The merge depends on this
+        // order only as the tie-break: run index 0 wins an exact-timestamp tie, so the order
+        // matters for ties and for nothing else.
         input_paths: listing.live.iter().rev().map(data_path).collect(),
         listed_names: listing.live.iter().map(display_name).collect(),
         listing,

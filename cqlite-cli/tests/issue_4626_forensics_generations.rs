@@ -299,6 +299,52 @@ fn find_lists_a_below_floor_generation() {
     );
 }
 
+/// #4671 finding 2: find LISTS an Orphan (as an UNREADABLE row), so its stderr note must not say
+/// "not listed".
+#[test]
+fn find_orphan_note_is_verb_correct() {
+    let root = TempDir::new().unwrap();
+    let dir = seeded(root.path(), "snap_backup", "snap_backup");
+    std::fs::remove_file(dir.join("nb-3-big-Data.db")).unwrap();
+    let schema = schema_file(root.path(), "snap_backup");
+    let o = find(&dir, &schema, &[]);
+    assert_eq!(o.status.code(), Some(2), "{}", err(&o));
+    assert!(
+        out(&o).contains("nb-3-big-Data.db: UNREADABLE"),
+        "{}",
+        out(&o)
+    );
+    assert!(
+        err(&o).contains("excluded from the live set") && !err(&o).contains("not listed"),
+        "{}",
+        err(&o)
+    );
+}
+
+/// #4671 finding 4 (Q44): a transaction log with a corrupt record is a note the verb refuses to
+/// prove `unflushed` through. It appears as its own UNREADABLE row and the run exits 2.
+#[test]
+fn find_reports_a_corrupt_transaction_log_as_a_blocking_row() {
+    let (root, dir) = stamped_fixture_copy("txn_committed");
+    let log = dir.join("nb_txn_compaction_dcc367f0-e899-11f1-8c24-9315fc18c6f9.log");
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.contains("[1949738987]"));
+    std::fs::write(&log, text.replace("[1949738987]", "[1949738988]")).unwrap();
+    let schema = schema_file(root.path(), "txn_compaction");
+    let o = find(&dir, &schema, &["--out", "json"]);
+    assert_eq!(o.status.code(), Some(2), "{}{}", out(&o), err(&o));
+    let rows = find_rows(&o);
+    let row = rows
+        .iter()
+        .find(|r| r["basename"].as_str().unwrap().ends_with(".log"))
+        .unwrap_or_else(|| panic!("the corrupt log is a row: {rows:?}"));
+    assert_eq!(row["probe"], "unreadable");
+    assert!(
+        row["cause"].as_str().unwrap().contains("CorruptTxnLog"),
+        "{row}"
+    );
+}
+
 /// GD7: an inconsistent transaction state is refused, exit 2 naming the log.
 #[test]
 fn find_refuses_an_inconsistent_transaction_state() {
@@ -476,8 +522,14 @@ fn diff_shows_a_toc_missing_generation_on_side_b() {
     let o = diff(&a, &b, &schema);
     assert_eq!(o.status.code(), Some(0), "{}", err(&o));
     let first = first_line(&o);
+    // #4671: the module's name for the generation, suffix included. The renderer quotes a field
+    // that holds a space (R10), so the suffixed name is a quoted string.
     assert!(
-        first.contains("side_b: generations=1 [nb-1-big]"),
+        first.contains(r#"side_b: generations=1 ["nb-1-big (toc-missing)"]"#),
+        "{first}"
+    );
+    assert!(
+        first.contains("side_a: generations=1 [nb-1-big]"),
         "{first}"
     );
 }

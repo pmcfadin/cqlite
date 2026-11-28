@@ -28,6 +28,21 @@ pub enum Condition {
     Absent,
 }
 
+impl std::fmt::Display for Condition {
+    /// The condition's stable name, exactly the variant name: verbs print it in their output and
+    /// tests pin it, so it never follows `Debug` by accident.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TocMissing => "TocMissing",
+            Self::Orphan => "Orphan",
+            Self::UnsupportedVersion => "UnsupportedVersion",
+            Self::Unreadable => "Unreadable",
+            Self::Corrupt => "Corrupt",
+            Self::Absent => "Absent",
+        })
+    }
+}
+
 /// Which one directory a listing reads (G8). No scope recurses.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Scope {

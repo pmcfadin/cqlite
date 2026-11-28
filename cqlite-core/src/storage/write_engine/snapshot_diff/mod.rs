@@ -59,17 +59,20 @@ use crate::Error;
 fn side_info(side: &DiffSide) -> SideInfo {
     SideInfo {
         dir: side.dir.display().to_string(),
-        generations: side
-            .generations
-            .iter()
-            .rev()
-            .map(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.strip_suffix("-Data.db").unwrap_or(name).to_string())
-                    .unwrap_or_else(|| path.display().to_string())
-            })
-            .collect(),
+        generations: if !side.listed_names.is_empty() {
+            side.listed_names.clone()
+        } else {
+            side.generations
+                .iter()
+                .rev()
+                .map(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| name.strip_suffix("-Data.db").unwrap_or(name).to_string())
+                        .unwrap_or_else(|| path.display().to_string())
+                })
+                .collect()
+        },
     }
 }
 

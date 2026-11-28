@@ -48,7 +48,7 @@ pub(crate) fn metadata_refusal(generation: &Generation) -> Option<String> {
     match generation.trusted_metadata() {
         Ok(_) => None,
         Err(failure) => Some(format!(
-            "{}: {:?}: {failure}",
+            "{}: {}: {failure}",
             data_path(generation).display(),
             failure.condition()
         )),
@@ -60,7 +60,8 @@ pub(crate) fn metadata_refusal(generation: &Generation) -> Option<String> {
 pub(crate) fn print_listing_facts(verb: &str, listing: &Listing) {
     for orphan in &listing.orphans {
         eprintln!(
-            "cqlite {verb}: note: {} is an Orphan (Data.db missing or zero-length) and is not listed",
+            "cqlite {verb}: note: {} is an Orphan (Data.db missing or zero-length) and is excluded \
+             from the live set",
             data_path(orphan).display()
         );
     }

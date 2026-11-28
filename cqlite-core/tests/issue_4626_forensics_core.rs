@@ -183,3 +183,71 @@ fn the_directory_scan_follows_the_generation_module() {
         "{error}"
     );
 }
+
+/// #4671 finding 6: the wording of a condition is a stable, pinned contract (verbs print it).
+#[test]
+fn condition_display_wording_is_pinned() {
+    // An exhaustive match: a new variant fails to compile here until its wording is pinned.
+    for c in [
+        Condition::TocMissing,
+        Condition::Orphan,
+        Condition::UnsupportedVersion,
+        Condition::Unreadable,
+        Condition::Corrupt,
+        Condition::Absent,
+    ] {
+        let want = match c {
+            Condition::TocMissing => "TocMissing",
+            Condition::Orphan => "Orphan",
+            Condition::UnsupportedVersion => "UnsupportedVersion",
+            Condition::Unreadable => "Unreadable",
+            Condition::Corrupt => "Corrupt",
+            Condition::Absent => "Absent",
+        };
+        assert_eq!(c.to_string(), want);
+    }
+}
+
+/// A `MakeWriter` collecting everything `tracing` emits on this thread.
+#[derive(Clone, Default)]
+struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+    type Writer = Captured;
+    fn make_writer(&'a self) -> Captured {
+        self.clone()
+    }
+}
+
+/// #4671 finding 6: the directory scan does not drop a corrupt-log note silently: it warns,
+/// naming the log. (An inconsistent state stays an error, covered by the module's own tests.)
+#[test]
+fn the_directory_scan_warns_about_a_corrupt_transaction_log() {
+    let (_root, dir) = stamped_fixture_copy("txn_committed");
+    let log = dir.join("nb_txn_compaction_dcc367f0-e899-11f1-8c24-9315fc18c6f9.log");
+    let text = std::fs::read_to_string(&log).unwrap();
+    std::fs::write(&log, text.replace("[1949738987]", "[1949738988]")).unwrap();
+    let captured = Captured::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(captured.clone())
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let scanned = tracing::subscriber::with_default(subscriber, || SSTableDirectory::scan(&dir));
+    scanned.expect("a corrupt record is a note, not a refusal");
+    let logged = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        logged.contains("WARN")
+            && logged.contains("nb_txn_compaction_dcc367f0-e899-11f1-8c24-9315fc18c6f9.log"),
+        "{logged}"
+    );
+}

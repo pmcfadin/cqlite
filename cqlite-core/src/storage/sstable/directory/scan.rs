@@ -4,7 +4,9 @@ use std::path::Path;
 use std::str::FromStr;
 
 use crate::error::{Error, Result};
-use crate::storage::sstable::generation::{list_generations, GenerationId, Scope, TocPolicy};
+use crate::storage::sstable::generation::{
+    list_generations, DirectoryNote, GenerationId, Scope, TocPolicy,
+};
 
 use super::types::{SSTableComponent, SSTableGeneration, SecondaryIndex};
 
@@ -48,6 +50,19 @@ pub(crate) fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SS
 
     let listing = list_generations(path, &Scope::Live, TocPolicy::Accept)
         .map_err(|e| Error::storage(format!("Failed to list SSTables in {:?}: {}", path, e)))?;
+
+    // A corrupt transaction-log record is not a refusal (the module classified from the readable
+    // records, as Cassandra's startup lister does), but it is not silent either.
+    for note in &listing.notes {
+        if let DirectoryNote::CorruptTxnLog { path, reasons } = note {
+            tracing::warn!(
+                "transaction log {} has records that failed verification ({}); \
+                 the scan used the readable records",
+                path.display(),
+                reasons.join("; ")
+            );
+        }
+    }
 
     let mut generations: Vec<SSTableGeneration> = Vec::new();
     for listed in listing.live.iter().chain(listing.orphans.iter()) {

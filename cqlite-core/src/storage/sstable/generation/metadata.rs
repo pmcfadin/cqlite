@@ -32,13 +32,42 @@ const STATISTICS_COMPONENT: &str = "Statistics.db";
 /// [`Generation`] shares it, so a failure is judged once however many copies exist.
 pub(super) type MetadataCell = Arc<OnceLock<std::result::Result<Loaded, MetadataFailure>>>;
 
-/// What one successful load keeps: the parsed value and the checked bytes it was parsed from. A
-/// consumer that needs a STATS field the typed value does not carry (`diagnose`'s repair and
-/// compression fields) decodes it from these bytes instead of reading the file a second time.
+/// What one successful load keeps: the parsed value and the small STATS fields `diagnose` needs
+/// that the typed value does not carry. The `Statistics.db` bytes themselves are NOT kept: a file
+/// may be up to `MAX_STATISTICS_BYTES` and a listing holds one cell per generation, so retaining
+/// them would hold every generation's buffer for the whole run.
 #[derive(Debug, Clone)]
 pub(super) struct Loaded {
     stats: Arc<SSTableStatistics>,
-    bytes: Arc<[u8]>,
+    facts: std::result::Result<Arc<StatisticsFacts>, String>,
+}
+
+/// STATS fields decoded once, inside the loader, from the same bytes as the typed value.
+#[derive(Debug, Clone)]
+pub struct StatisticsFacts {
+    pub(crate) repair: crate::parser::repair_metadata::RepairMetadata,
+    pub(crate) cell_per_partition:
+        Option<crate::parser::repair_metadata::diagnose_fields::CellPerPartitionStats>,
+    pub(crate) compression_ratio: Option<f64>,
+    /// The STATS component's own `(minTimestamp, minLocalDeletionTime)`.
+    pub(crate) minimums: Option<(i64, i64)>,
+}
+
+fn decode_facts(
+    bytes: &[u8],
+    gates: &VersionGates,
+) -> std::result::Result<StatisticsFacts, String> {
+    use crate::parser::repair_metadata::diagnose_fields::{
+        read_cell_per_partition_stats, read_compression_ratio, read_stats_minimums,
+    };
+    let e = |e: Error| e.to_string();
+    Ok(StatisticsFacts {
+        repair: crate::parser::repair_metadata::parse_repair_metadata(bytes, Some(gates))
+            .map_err(e)?,
+        cell_per_partition: read_cell_per_partition_stats(bytes).map_err(e)?,
+        compression_ratio: read_compression_ratio(bytes).map_err(e)?,
+        minimums: read_stats_minimums(bytes, Some(gates)).map_err(e)?,
+    })
 }
 
 /// Why a generation's trusted metadata is unavailable. Each variant is one [`Condition`].
@@ -130,24 +159,27 @@ impl Generation {
             .clone()
     }
 
-    /// The `Statistics.db` bytes the trusted metadata was parsed from: the same single read, never
-    /// a second one (G11). For a consumer that decodes a STATS field the typed value does not
-    /// carry; the failure is the accessor's own, cached.
-    pub fn trusted_statistics_bytes(&self) -> std::result::Result<Arc<[u8]>, MetadataFailure> {
-        self.loaded_with(&read_checked).map(|l| l.bytes)
+    /// The STATS fields `diagnose` reports beyond the typed value, from the same single read
+    /// (G11, GD9). A decode failure is `Corrupt`, naming the file.
+    pub fn statistics_facts(&self) -> std::result::Result<Arc<StatisticsFacts>, MetadataFailure> {
+        self.statistics_facts_via(&read_checked)
     }
 
-    /// The version gates the descriptor selects, or `None` when it selects none (below the floor
-    /// or not a version the format defines).
-    pub fn version_gates(&self) -> Option<VersionGates> {
-        match self.format {
-            SsTableFormat::Big => BigVersionGates::from_version(&self.version)
-                .map(VersionGates::Big)
-                .ok(),
-            SsTableFormat::Bti => BtiVersionGates::from_version(&self.version)
-                .map(VersionGates::Bti)
-                .ok(),
-        }
+    /// [`Generation::statistics_facts`] with the file read injected. Not part of the stable
+    /// surface.
+    #[doc(hidden)]
+    pub fn statistics_facts_via(
+        &self,
+        read: &dyn Fn(&Path) -> Result<Vec<u8>>,
+    ) -> std::result::Result<Arc<StatisticsFacts>, MetadataFailure> {
+        self.loaded_with(read)?
+            .facts
+            .map_err(|detail| MetadataFailure::Corrupt {
+                path: self
+                    .directory
+                    .join(format!("{}-{STATISTICS_COMPONENT}", self.base_name())),
+                detail,
+            })
     }
 
     /// [`Generation::trusted_metadata`] with the file read injected, so a caller can count or
@@ -198,10 +230,12 @@ impl Generation {
             detail: e.to_string(),
         })?;
         let parsed = parse_statistics_with_fallback_detailed(&bytes, Some(&gates)).map(|(_, s)| s);
+        // The facts are decoded from the same buffer; it is dropped when this function returns.
+        let facts = decode_facts(&bytes, &gates).map(Arc::new);
         match parsed {
             Ok(stats) => Ok(Loaded {
                 stats: Arc::new(stats),
-                bytes: Arc::from(bytes),
+                facts,
             }),
             Err(e) => Err(MetadataFailure::Corrupt {
                 path,

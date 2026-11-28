@@ -90,6 +90,22 @@ fn resolve_side(
     let resolved = resolve_generations(&dir)
         .map_err(|error| Failure::read(format!("side={label}: {error}")))?;
     crate::commands::generation_listing::print_listing_facts("diff", &resolved.listing);
+    // A side holding an Orphan (Data.db missing or zero-length) is REFUSED: dropping it and
+    // continuing could report a false divergence or resurrection (#4671).
+    if !resolved.listing.orphans.is_empty() {
+        return Err(Failure::read(format!(
+            "side={label}: refusing {} with an Orphan generation (Data.db missing or zero-length): {}",
+            dir.display(),
+            resolved
+                .listing
+                .orphans
+                .iter()
+                .map(|o| crate::commands::generation_listing::data_path(o).display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    let listed_names = resolved.listed_names;
     let generations = resolved.input_paths;
     if generations.is_empty() {
         return Err(Failure::usage(format!(
@@ -97,7 +113,13 @@ fn resolve_side(
             dir.display()
         )));
     }
-    Ok(cqlite_core::storage::write_engine::snapshot_diff::DiffSide { dir, generations })
+    Ok(
+        cqlite_core::storage::write_engine::snapshot_diff::DiffSide {
+            dir,
+            generations,
+            listed_names,
+        },
+    )
 }
 
 #[cfg(feature = "write-support")]

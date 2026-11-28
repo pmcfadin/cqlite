@@ -349,7 +349,7 @@ fn list_targets(
             } else {
                 match g.trusted_metadata() {
                     Err(f) if f.condition() != Condition::Absent => {
-                        Some(format!("{:?}: {f}", f.condition()))
+                        Some(format!("{}: {f}", f.condition()))
                     }
                     _ => None,
                 }
@@ -358,6 +358,31 @@ fn list_targets(
         })
         .collect();
     Ok((targets, listing))
+}
+
+/// A transaction log with records that failed verification (Q44: a verb MAY refuse on it) leaves
+/// the Live set uncertain: a generation it should hide may have been listed, or the reverse. Each
+/// such log is its own UNREADABLE row, so it fails the run closed and blocks an `unflushed` `yes`
+/// exactly as a generation that could not be probed does.
+fn note_rows(listing: &cqlite_core::storage::sstable::generation::Listing) -> Vec<GenRow> {
+    use cqlite_core::storage::sstable::generation::DirectoryNote;
+    listing
+        .notes
+        .iter()
+        .filter_map(|note| match note {
+            DirectoryNote::CorruptTxnLog { path, reasons } => Some(GenRow {
+                basename: path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string()),
+                outcome: GenOutcome::Unreadable(format!(
+                    "CorruptTxnLog: records failed verification ({}); the live set is uncertain",
+                    reasons.join("; ")
+                )),
+            }),
+            DirectoryNote::RelocatedTxnLog { .. } => None,
+        })
+        .collect()
 }
 
 /// Probe every generation. Never short-circuits: each failure becomes its own named row.
@@ -436,12 +461,12 @@ pub async fn execute_find_command(
         Ok(k) => k,
         Err(e) => usage(&format!("{e:#}")),
     };
-    let gens = match list_targets(&args.table_dir) {
+    let (gens, blocking_rows) = match list_targets(&args.table_dir) {
         // A never-flushed table has no generation: a legitimate "where did my write go"
         // answer (everything is in the CommitLog), not a usage error.
         Ok((g, listing)) => {
             super::generation_listing::print_listing_facts("find", &listing);
-            g
+            (g, note_rows(&listing))
         }
         // An operational read failure, not a usage error: exit 2 with the cause named. An
         // inconsistent transaction state is refused here too (GD7).
@@ -450,7 +475,8 @@ pub async fn execute_find_command(
             std::process::exit(2);
         }
     };
-    let generations = probe_generations(&gens, &key, &schema).await;
+    let mut generations = probe_generations(&gens, &key, &schema).await;
+    generations.extend(blocking_rows);
     let commitlog = args
         .commitlog
         .as_ref()

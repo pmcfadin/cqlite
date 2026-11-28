@@ -130,6 +130,7 @@ pub fn side_of(dir: &Path) -> DiffSide {
     DiffSide {
         dir: dir.to_path_buf(),
         generations: found.into_iter().map(|(_, p)| p).collect(),
+        listed_names: Vec::new(),
     }
 }
 

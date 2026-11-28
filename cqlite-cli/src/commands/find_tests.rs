@@ -374,3 +374,36 @@ fn key_encoding_does_not_depend_on_the_partition_key_column_name() {
     schema.partition_keys[1].name = "sel\"ect".into();
     assert!(encode_partition_key(&schema, "1, 'x'").is_ok());
 }
+
+/// #4671 finding 4: a corrupt-transaction-log note becomes a blocking row, so no `yes` verdict can
+/// be proven through it (Q44), exactly like an unreadable generation.
+#[test]
+fn a_corrupt_txn_log_note_blocks_the_unflushed_yes() {
+    use cqlite_core::storage::sstable::generation::{DirectoryNote, Listing};
+    let mut listing = Listing::default();
+    listing.notes.push(DirectoryNote::CorruptTxnLog {
+        path: std::path::PathBuf::from("/t/nb_txn_compaction_x.log"),
+        reasons: vec!["bad checksum".to_string()],
+    });
+    let rows = note_rows(&listing);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].basename, "nb_txn_compaction_x.log");
+    assert!(matches!(&rows[0].outcome, GenOutcome::Unreadable(c) if c.contains("CorruptTxnLog")));
+    assert!(matches!(
+        unflushed(Writetime::Known(100), cell("a", 100), &rows),
+        Unflushed::Unmeasured(_)
+    ));
+    // Without the note the same mutation would be proven unflushed.
+    assert_eq!(
+        unflushed(Writetime::Known(100), cell("a", 100), &[miss()]),
+        Unflushed::Yes
+    );
+    assert_eq!(
+        FindReport {
+            generations: rows,
+            commitlog: None
+        }
+        .exit_code(),
+        2
+    );
+}
