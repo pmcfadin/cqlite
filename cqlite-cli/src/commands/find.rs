@@ -297,59 +297,82 @@ pub fn parse_table_dir_name(dir: &Path) -> Option<(String, String)> {
     Some((table.to_string(), dashed))
 }
 
-/// Component names (after the `<version>-<generation>-<format>-` prefix) that mark a file as part
-/// of an SSTable generation.
-const GENERATION_COMPONENTS: &[&str] = &[
-    "Data.db",
-    "Index.db",
-    "Statistics.db",
-    "Summary.db",
-    "Filter.db",
-    "TOC.txt",
-    "CompressionInfo.db",
-    "Digest.crc32",
-    "CRC.db",
-    "Partitions.db",
-    "Rows.db",
-];
+/// One generation `find` reports on: where its `Data.db` is (or would be) and, when the listing
+/// or its trusted metadata already says it cannot be probed, why.
+#[derive(Debug, Clone)]
+struct ProbeTarget {
+    data_path: PathBuf,
+    /// A condition that makes the probe impossible (GD7): named in the report, never dropped.
+    refusal: Option<String>,
+}
 
-/// The expected `*-Data.db` of EVERY generation that has any recognised component in `dir`,
-/// ordered by generation number (name tie-break). A generation whose `Data.db` is gone but whose
-/// `TOC.txt`/`Index.db`/`Statistics.db` remain is still listed — it is then probed and reported
-/// as UNREADABLE, never silently omitted.
-fn list_generations(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut prefixes: std::collections::BTreeSet<(u64, String)> = std::collections::BTreeSet::new();
-    for entry in std::fs::read_dir(dir)? {
-        let name = entry?.file_name().to_string_lossy().into_owned();
-        // `<version>-<generation>-<format>-<Component>`
-        let mut parts = name.splitn(4, '-');
-        let (Some(ver), Some(gen), Some(fmt), Some(component)) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
-            continue;
-        };
-        if !GENERATION_COMPONENTS.contains(&component) {
-            continue;
-        }
-        // A non-numeric generation sorts last.
-        let order = gen.parse::<u64>().unwrap_or(u64::MAX);
-        prefixes.insert((order, format!("{ver}-{gen}-{fmt}")));
-    }
-    Ok(prefixes
+/// Every generation of `dir` that `find` reports on, in id order: the Live set (Scope Live,
+/// `TocMissing` accepted; a transaction log's hidden files are not probed, GD7.1) plus the
+/// Orphans, which stay in the report as unprobeable generations rather than vanishing from it
+/// (F5.2). A generation whose trusted metadata is `Corrupt`, `Unreadable` or below the floor is
+/// listed with that condition instead of being probed; `Absent` is left to the reader, which
+/// opens a generation without `Statistics.db` as it always did.
+fn list_targets(
+    dir: &Path,
+) -> Result<
+    (
+        Vec<ProbeTarget>,
+        cqlite_core::storage::sstable::generation::Listing,
+    ),
+    cqlite_core::storage::sstable::generation::GenerationError,
+> {
+    use cqlite_core::storage::sstable::generation::Condition;
+    let listing = super::generation_listing::list_live(dir)?;
+    let mut keyed: Vec<(&cqlite_core::storage::sstable::generation::Generation, bool)> = listing
+        .live
+        .iter()
+        .map(|g| (g, false))
+        .chain(listing.orphans.iter().map(|g| (g, true)))
+        .collect();
+    keyed.sort_by(|a, b| {
+        a.0.id()
+            .cmp(b.0.id())
+            .then_with(|| a.0.base_name().cmp(&b.0.base_name()))
+    });
+    let targets = keyed
         .into_iter()
-        .map(|(_, prefix)| dir.join(format!("{prefix}-Data.db")))
-        .collect())
+        .map(|(g, orphan)| {
+            let data_path = super::generation_listing::data_path(g);
+            let refusal = if orphan {
+                Some(if data_path.exists() {
+                    "Orphan: Data.db is zero-length".to_string()
+                } else {
+                    "Orphan: Data.db is missing although other components of this generation \
+                     are present"
+                        .to_string()
+                })
+            } else {
+                match g.trusted_metadata() {
+                    Err(f) if f.condition() != Condition::Absent => {
+                        Some(format!("{:?}: {f}", f.condition()))
+                    }
+                    _ => None,
+                }
+            };
+            ProbeTarget { data_path, refusal }
+        })
+        .collect();
+    Ok((targets, listing))
 }
 
 /// Probe every generation. Never short-circuits: each failure becomes its own named row.
-pub async fn probe_generations(gens: &[PathBuf], key: &[u8], schema: &TableSchema) -> Vec<GenRow> {
+async fn probe_generations(gens: &[ProbeTarget], key: &[u8], schema: &TableSchema) -> Vec<GenRow> {
     let mut rows = Vec::with_capacity(gens.len());
-    for path in gens {
+    for target in gens {
+        let path = &target.data_path;
         let basename = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
-        let outcome = probe_one(path, key, schema).await;
+        let outcome = match &target.refusal {
+            Some(cause) => GenOutcome::Unreadable(cause.clone()),
+            None => probe_one(path, key, schema).await,
+        };
         rows.push(GenRow { basename, outcome });
     }
     rows
@@ -413,11 +436,15 @@ pub async fn execute_find_command(
         Ok(k) => k,
         Err(e) => usage(&format!("{e:#}")),
     };
-    let gens = match list_generations(&args.table_dir) {
+    let gens = match list_targets(&args.table_dir) {
         // A never-flushed table has no generation: a legitimate "where did my write go"
         // answer (everything is in the CommitLog), not a usage error.
-        Ok(g) => g,
-        // An operational read failure, not a usage error: exit 2 with the cause named.
+        Ok((g, listing)) => {
+            super::generation_listing::print_listing_facts("find", &listing);
+            g
+        }
+        // An operational read failure, not a usage error: exit 2 with the cause named. An
+        // inconsistent transaction state is refused here too (GD7).
         Err(e) => {
             eprintln!("cqlite find: cannot list {}: {e}", args.table_dir.display());
             std::process::exit(2);

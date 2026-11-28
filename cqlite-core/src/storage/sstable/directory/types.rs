@@ -15,12 +15,11 @@ pub struct SSTableGeneration {
     ///
     /// This is the authoritative version letter used to construct `VersionGates`
     /// (see `storage/sstable/version_gate.rs`).  The field is populated by
-    /// `parse_sstable_filename` when scanning a directory.
+    /// the generation module's listing when scanning a directory.
     ///
-    /// Cassandra 5.0 supports two SSTable ID forms (Descriptor.java:85, 95):
-    /// - Sequential: `nb-1-big-Data.db`  (integer id)
-    /// - UUID-based: `nb-6aa08200…-big-Data.db`  (hex string)
-    ///   Both are accepted; the version letter is always the first segment.
+    /// Cassandra 5.0 has two SSTable ID forms (`SequenceBasedSSTableId`, `UUIDBasedSSTableId`).
+    /// This type carries only the sequential one (`generation` is a `u32`); a scan that meets a
+    /// UUID id fails by name instead of dropping it.
     pub version: String,
     /// Format type (e.g., "big", "bti")
     pub format: String,

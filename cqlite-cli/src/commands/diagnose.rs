@@ -73,6 +73,9 @@ pub async fn execute_diagnose_command(schema_path: Option<&Path>, args: &Diagnos
     let report = diagnose_table(&args.table_dir, &options)
         .await
         .unwrap_or_else(|e| usage_error(e));
+    // Q44, Q47: directory-level facts (a corrupt or relocated transaction log) go to stderr, so the
+    // stdout report keeps the shape R7 pins.
+    super::generation_listing::print_notes("diagnose", &report.notes);
     let rendered = match args.out {
         VerifyOutputArg::Json => render_json(&report),
         VerifyOutputArg::Text => render_text(&report),
@@ -215,6 +218,14 @@ fn generation_json(g: &GenerationDiagnosis) -> Value {
         "deep".into(),
         g.deep.as_ref().map_or(Value::Null, deep_json),
     );
+    // GD8.1: appended only when the listing attached a condition, so a healthy generation keeps
+    // exactly the key set R7.1 pins.
+    if !g.conditions.is_empty() {
+        m.insert(
+            "conditions".into(),
+            Value::Array(g.conditions.iter().map(|c| json!(format!("{c:?}"))).collect()),
+        );
+    }
     Value::Object(m)
 }
 
@@ -307,6 +318,16 @@ pub(crate) fn render_text(r: &DiagnoseReport) -> Result<String, String> {
             "\ngeneration {} ({}) [statistics]\n",
             g.generation, g.format
         ));
+        if !g.conditions.is_empty() {
+            o.push_str(&format!(
+                "  conditions: {}\n",
+                g.conditions
+                    .iter()
+                    .map(|c| format!("{c:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         o.push_str(&format!("  min timestamp: {}\n", g.min_timestamp));
         o.push_str(&format!(
             "  max timestamp: {}\n",

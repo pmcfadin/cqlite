@@ -3,7 +3,7 @@
 //! READ-ONLY. Nothing here opens an input for writing, creates a file or modifies either snapshot
 //! directory; the report is rendered to stdout only (like `explain`, `diff` does not accept the
 //! global `--output`/`--overwrite` file-write flags). Each side is resolved exactly as `explain`
-//! resolves a table directory (`explain_resolve::{resolve_table_dir, discover_live_generations}`:
+//! resolves a table directory (`explain_resolve::{resolve_table_dir, resolve_generations}`:
 //! live generations only, never `snapshots/`, `backups/` or index subdirectories).
 //!
 //! Exit codes: 0 = a report was rendered (divergence and resurrection risk are findings, not
@@ -75,7 +75,7 @@ fn resolve_side(
     keyspace: &str,
     table: &str,
 ) -> std::result::Result<cqlite_core::storage::write_engine::snapshot_diff::DiffSide, Failure> {
-    use crate::commands::explain_resolve::{discover_live_generations, resolve_table_dir};
+    use crate::commands::explain_resolve::{resolve_generations, resolve_table_dir};
     if !root.is_dir() {
         return Err(Failure::usage(format!(
             "side={label}: {} does not exist or is not a directory",
@@ -84,12 +84,13 @@ fn resolve_side(
     }
     let dir = resolve_table_dir(root, keyspace, table)
         .map_err(|error| Failure::usage(format!("side={label}: {error}")))?;
-    let generations = discover_live_generations(&dir).map_err(|error| {
-        Failure::read(format!(
-            "side={label}: could not list {}: {error}",
-            dir.display()
-        ))
-    })?;
+    // GD6: each side is the generation module's Scope Live, `TocMissing` accepted. A condition
+    // that refuses (below floor, `Corrupt`, `Unreadable`, an inconsistent transaction state) is
+    // exit 2 naming the side.
+    let resolved = resolve_generations(&dir)
+        .map_err(|error| Failure::read(format!("side={label}: {error}")))?;
+    crate::commands::generation_listing::print_listing_facts("diff", &resolved.listing);
+    let generations = resolved.input_paths;
     if generations.is_empty() {
         return Err(Failure::usage(format!(
             "side={label}: no published SSTable generations found under {}",

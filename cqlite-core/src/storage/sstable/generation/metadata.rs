@@ -30,8 +30,16 @@ const STATISTICS_COMPONENT: &str = "Statistics.db";
 
 /// The shared, lazily filled cache of one generation's metadata outcome. Cloning a
 /// [`Generation`] shares it, so a failure is judged once however many copies exist.
-pub(super) type MetadataCell =
-    Arc<OnceLock<std::result::Result<Arc<SSTableStatistics>, MetadataFailure>>>;
+pub(super) type MetadataCell = Arc<OnceLock<std::result::Result<Loaded, MetadataFailure>>>;
+
+/// What one successful load keeps: the parsed value and the checked bytes it was parsed from. A
+/// consumer that needs a STATS field the typed value does not carry (`diagnose`'s repair and
+/// compression fields) decodes it from these bytes instead of reading the file a second time.
+#[derive(Debug, Clone)]
+pub(super) struct Loaded {
+    stats: Arc<SSTableStatistics>,
+    bytes: Arc<[u8]>,
+}
 
 /// Why a generation's trusted metadata is unavailable. Each variant is one [`Condition`].
 #[derive(Debug, Clone, thiserror::Error)]
@@ -110,15 +118,52 @@ impl Generation {
         &self,
         read: &dyn Fn(&Path) -> Result<Vec<u8>>,
     ) -> std::result::Result<Arc<SSTableStatistics>, MetadataFailure> {
+        self.loaded_with(read).map(|l| l.stats)
+    }
+
+    fn loaded_with(
+        &self,
+        read: &dyn Fn(&Path) -> Result<Vec<u8>>,
+    ) -> std::result::Result<Loaded, MetadataFailure> {
         self.metadata
             .get_or_init(|| self.load_metadata(read))
             .clone()
     }
 
-    fn load_metadata(
+    /// The `Statistics.db` bytes the trusted metadata was parsed from: the same single read, never
+    /// a second one (G11). For a consumer that decodes a STATS field the typed value does not
+    /// carry; the failure is the accessor's own, cached.
+    pub fn trusted_statistics_bytes(&self) -> std::result::Result<Arc<[u8]>, MetadataFailure> {
+        self.loaded_with(&read_checked).map(|l| l.bytes)
+    }
+
+    /// The version gates the descriptor selects, or `None` when it selects none (below the floor
+    /// or not a version the format defines).
+    pub fn version_gates(&self) -> Option<VersionGates> {
+        match self.format {
+            SsTableFormat::Big => BigVersionGates::from_version(&self.version)
+                .map(VersionGates::Big)
+                .ok(),
+            SsTableFormat::Bti => BtiVersionGates::from_version(&self.version)
+                .map(VersionGates::Bti)
+                .ok(),
+        }
+    }
+
+    /// [`Generation::trusted_metadata`] with the file read injected, so a caller can count or
+    /// forbid opens (the GD9 one-read-per-run proof). Not part of the stable surface.
+    #[doc(hidden)]
+    pub fn trusted_metadata_via(
         &self,
         read: &dyn Fn(&Path) -> Result<Vec<u8>>,
     ) -> std::result::Result<Arc<SSTableStatistics>, MetadataFailure> {
+        self.trusted_metadata_with(read)
+    }
+
+    fn load_metadata(
+        &self,
+        read: &dyn Fn(&Path) -> Result<Vec<u8>>,
+    ) -> std::result::Result<Loaded, MetadataFailure> {
         // 1. The floor, from the descriptor alone: no file has been touched.
         if let Some(below) = &self.below_floor {
             return Err(MetadataFailure::UnsupportedVersion {
@@ -152,8 +197,12 @@ impl Generation {
             path: path.clone(),
             detail: e.to_string(),
         })?;
-        match parse_statistics_with_fallback_detailed(&bytes, Some(&gates)) {
-            Ok((_, stats)) => Ok(Arc::new(stats)),
+        let parsed = parse_statistics_with_fallback_detailed(&bytes, Some(&gates)).map(|(_, s)| s);
+        match parsed {
+            Ok(stats) => Ok(Loaded {
+                stats: Arc::new(stats),
+                bytes: Arc::from(bytes),
+            }),
             Err(e) => Err(MetadataFailure::Corrupt {
                 path,
                 detail: e.to_string(),

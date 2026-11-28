@@ -9,7 +9,7 @@
 //! - `SsTableDescriptor::parse_filename` extracts the version letter from all
 //!   real-world filename patterns.
 //!
-//! Tests for `parse_sstable_filename` (version letter in returned tuple) live in
+//! Tests for the directory scan's version letter (via the generation module) live in
 //! `directory/tests.rs` because they access the private `scan` sub-module.
 
 #[cfg(test)]

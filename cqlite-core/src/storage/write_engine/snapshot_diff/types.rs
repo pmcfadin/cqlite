@@ -42,7 +42,7 @@ impl std::fmt::Display for Side {
 /// One compared snapshot: its directory plus the live generations the caller resolved in it,
 /// **newest first** (`run_index` 0 is the newest generation, the last-write-wins tie-break rank
 /// every other merger caller uses). The CLI resolves both with
-/// `explain_resolve::{resolve_table_dir, discover_live_generations}`.
+/// `explain_resolve::{resolve_table_dir, resolve_generations}`.
 #[derive(Debug, Clone)]
 pub struct DiffSide {
     /// The flat table directory (kept for the report only; never read or written here).

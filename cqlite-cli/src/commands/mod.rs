@@ -21,6 +21,8 @@ pub mod bench;
 pub(crate) mod compact_output;
 #[cfg(feature = "write-support")]
 pub(crate) mod explain_resolve;
+#[cfg(feature = "write-support")]
+pub(crate) mod generation_listing;
 pub mod schema;
 #[cfg(feature = "write-support")]
 pub(crate) mod sstable_inputs;

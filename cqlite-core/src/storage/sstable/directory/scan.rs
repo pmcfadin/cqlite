@@ -4,7 +4,9 @@ use std::path::Path;
 use std::str::FromStr;
 
 use crate::error::{Error, Result};
-use crate::storage::sstable::version_gate::SsTableDescriptor;
+use crate::storage::sstable::generation::{
+    list_generations, GenerationId, Scope, TocPolicy,
+};
 
 use super::types::{SSTableComponent, SSTableGeneration, SecondaryIndex};
 
@@ -27,56 +29,18 @@ pub(crate) fn extract_table_name(dir_name: &str) -> Result<String> {
     }
 }
 
-/// Scan directory for SSTable files and group by generation
+/// Scan directory for SSTable files and group by generation.
+///
+/// Which files form generations is the generation module's answer (issue #4626, task 3.5), not a
+/// second filename parser: Scope Live over this one directory, so a committed compaction's
+/// obsolete inputs and an unfinished transaction's outputs are not read, and a generation without
+/// `TOC.txt` is still a generation (this reader validates its own components). A generation whose
+/// id is a UUID cannot be carried by `SSTableGeneration.generation` (`u32`); it is a NAMED error
+/// here, never silently dropped (G13).
 pub(crate) fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SSTableGeneration>> {
-    let entries = fs::read_dir(path)
-        .map_err(|e| Error::storage(format!("Failed to read directory: {:?}: {}", path, e)))?;
-
-    let mut generations_map: HashMap<(u32, String), SSTableGeneration> = HashMap::new();
-    let mut found_files = 0;
-    let mut valid_sstable_files = 0;
-
-    for entry in entries {
-        let entry = entry?;
-        let file_path = entry.path();
-        found_files += 1;
-
-        if let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) {
-            // Enhanced validation: Check if file exists and is readable
-            if !file_path.is_file() {
-                continue; // Skip directories and non-files
-            }
-
-            // Check file accessibility
-            if let Err(e) = fs::metadata(&file_path) {
-                tracing::warn!("Cannot access file {:?}: {}", file_path, e);
-                continue;
-            }
-
-            if let Some((version, generation, format, component)) =
-                parse_sstable_filename(file_name)?
-            {
-                valid_sstable_files += 1;
-                let key = (generation, format.clone());
-
-                let generation_obj =
-                    generations_map
-                        .entry(key.clone())
-                        .or_insert_with(|| SSTableGeneration {
-                            version: version.clone(),
-                            generation,
-                            format,
-                            table_name: table_name.to_string(),
-                            components: HashMap::new(),
-                            base_path: path.to_path_buf(),
-                        });
-
-                generation_obj.components.insert(component, file_path);
-            }
-        }
-    }
-
-    // Enhanced validation and reporting
+    let found_files = fs::read_dir(path)
+        .map_err(|e| Error::storage(format!("Failed to read directory: {:?}: {}", path, e)))?
+        .count();
     if found_files == 0 {
         return Err(Error::not_found(format!(
             "Directory appears to be empty: {:?}",
@@ -84,7 +48,38 @@ pub(crate) fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SS
         )));
     }
 
-    if valid_sstable_files == 0 {
+    let listing = list_generations(path, &Scope::Live, TocPolicy::Accept)
+        .map_err(|e| Error::storage(format!("Failed to list SSTables in {:?}: {}", path, e)))?;
+
+    let mut generations: Vec<SSTableGeneration> = Vec::new();
+    for listed in listing.live.iter().chain(listing.orphans.iter()) {
+        let GenerationId::Sequence(generation) = listed.id() else {
+            return Err(Error::unsupported_format(format!(
+                "SSTable generation {} in {:?} has a UUID id, which SSTableDirectory cannot carry \
+                 (its generation number is a u32)",
+                listed.base_name(),
+                path
+            )));
+        };
+        let mut components = HashMap::new();
+        for component in listed.components() {
+            // A name that is not a known component (an auxiliary dump, a custom component) is not
+            // part of the reader's component map.
+            if let Ok(kind) = SSTableComponent::from_str(&component.name) {
+                components.insert(kind, component.path.clone());
+            }
+        }
+        generations.push(SSTableGeneration {
+            version: listed.version().to_string(),
+            generation: *generation,
+            format: listed.format().as_str().to_string(),
+            table_name: table_name.to_string(),
+            components,
+            base_path: path.to_path_buf(),
+        });
+    }
+
+    if generations.is_empty() {
         return Err(Error::invalid_format(format!(
             "No valid SSTable files found in directory: {:?}. Found {} files total, but none match the expected SSTable naming pattern (e.g., nb-1-big-Data.db)",
             path,
@@ -93,86 +88,15 @@ pub(crate) fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SS
     }
 
     // Sort generations by number (newest first)
-    let mut generations: Vec<SSTableGeneration> = generations_map.into_values().collect();
     generations.sort_by_key(|b| std::cmp::Reverse(b.generation));
 
-    // Log summary for debugging
     tracing::debug!(
-        "Directory scan completed: {} total files, {} SSTable files, {} generations found",
+        "Directory scan completed: {} total files, {} generations found",
         found_files,
-        valid_sstable_files,
         generations.len()
     );
 
     Ok(generations)
-}
-
-/// Parse SSTable filename to extract version, generation, format, and component.
-///
-/// Returns `Ok(Some((version, generation, format, component)))` for recognised
-/// SSTable filenames.  Returns `Ok(None)` for non-SSTable files (e.g. `.jmx`,
-/// unknown extensions) or files whose SSTable id is not a plain integer (UUID-
-/// based ids are not yet supported by the `u32` generation field; see the
-/// `SSTableGeneration.sstable_id` tracking item).
-///
-/// # Examples
-/// ```text
-/// "nb-1-big-Data.db"     -> Some(("nb", 1, "big",  Data))
-/// "da-2-bti-Rows.db"     -> Some(("da", 2, "bti",  Rows))
-/// "oa-1-big-Data.db"     -> Some(("oa", 1, "big",  Data))
-/// ".gitignore"           -> None
-/// ```
-///
-/// The version letter is extracted via [`SsTableDescriptor`] which also validates
-/// the filename structure and supports both sequential and UUID-based SSTable ids.
-/// UUID-based ids are silently skipped (returning `None`) because the current
-/// `SSTableGeneration.generation` field is `u32`.
-pub(crate) fn parse_sstable_filename(
-    filename: &str,
-) -> Result<Option<(String, u32, String, SSTableComponent)>> {
-    use std::path::Path;
-
-    // Use SsTableDescriptor for authoritative filename parsing (handles both
-    // sequential and UUID-based ids, validates version letter format).
-    let desc = match SsTableDescriptor::parse(Path::new(filename)) {
-        Ok(d) => d,
-        Err(_) => {
-            // Not a recognised SSTable filename (e.g. .gitignore, jmx files).
-            return Ok(None);
-        }
-    };
-
-    // The generation field is u32; UUID-based ids (e.g. "6aa08200a251…") cannot
-    // be coerced to u32.  Skip them silently — these files will still be picked
-    // up once SSTableGeneration is upgraded to carry a String sstable_id.
-    let generation: u32 = match desc.sstable_id.parse() {
-        Ok(n) => n,
-        Err(_) => {
-            tracing::debug!(
-                "parse_sstable_filename: skipping UUID-id file {} (not a plain integer generation)",
-                filename
-            );
-            return Ok(None);
-        }
-    };
-
-    let format = desc.format.as_str().to_string();
-    let version = desc.version.clone();
-
-    // Return None for unrecognized components instead of propagating error.
-    // This follows the same pattern as TOC parsing (toc.rs:53-73).
-    let component = match SSTableComponent::from_str(&desc.component) {
-        Ok(c) => c,
-        Err(_) => {
-            tracing::debug!(
-                "Ignoring file with unrecognized component extension: {}",
-                filename
-            );
-            return Ok(None);
-        }
-    };
-
-    Ok(Some((version, generation, format, component)))
 }
 
 /// Scan directory for secondary index subdirectories
