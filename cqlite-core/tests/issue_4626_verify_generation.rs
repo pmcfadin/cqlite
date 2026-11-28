@@ -15,6 +15,7 @@ use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::verify::{
     verify_sstable, verify_sstable_audit, verify_sstable_generation, VerifyMode,
 };
+use cqlite_core::storage::sstable::verify_audit::AuditVerdict;
 use cqlite_core::{Config, Error};
 use std::collections::BTreeMap;
 #[cfg(unix)]
@@ -81,6 +82,9 @@ fn sorted_subdirs(dir: &Path) -> Vec<String> {
 struct Verdict {
     ok: bool,
     findings: Vec<(String, String)>,
+    /// Audit modes only: `(invariant id, "Pass" | "Fail" | "Skip: <reason>")` per row, in order.
+    #[serde(default)]
+    audit: Vec<(String, String)>,
 }
 
 async fn run_case(dir: &Path, mode: &str) -> Result<Verdict, String> {
@@ -99,9 +103,27 @@ async fn run_case(dir: &Path, mode: &str) -> Result<Verdict, String> {
         .map(|f| (f.class.code().to_string(), f.component.clone()))
         .collect();
     findings.sort();
+    let audit = report
+        .audit
+        .as_ref()
+        .map(|a| {
+            a.rows
+                .iter()
+                .map(|r| {
+                    let v = match &r.verdict {
+                        AuditVerdict::Pass => "Pass".to_string(),
+                        AuditVerdict::Fail => "Fail".to_string(),
+                        AuditVerdict::Skip(why) => format!("Skip: {why}"),
+                    };
+                    (r.invariant.to_string(), v)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(Verdict {
         ok: report.is_ok(),
         findings,
+        audit,
     })
 }
 
