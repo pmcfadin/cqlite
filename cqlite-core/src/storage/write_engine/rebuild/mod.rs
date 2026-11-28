@@ -241,6 +241,9 @@ pub struct SkippedComponent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebuildReport {
     pub input: String,
+    /// Where the regenerated generation lives. Omitted from the JSON (empty in memory) for an
+    /// Orphan entry, which writes nothing: an empty path would read as the current directory.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub output: String,
     /// `"nb"` for BIG input, `"da"` for BTI.
     pub format: String,

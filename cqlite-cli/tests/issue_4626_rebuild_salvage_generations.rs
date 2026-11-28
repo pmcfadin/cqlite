@@ -273,6 +273,12 @@ fn gd4_orphan_is_reported_in_the_manifest_and_not_rebuilt() {
     assert_eq!(orphan["input_conditions"], serde_json::json!(["Orphan"]));
     assert!(orphan["refused"].is_null(), "{orphan}");
     assert_eq!(orphan["regenerated"], serde_json::json!([]));
+    // No `output` key at all (an empty string would read as the current directory), while every
+    // rebuilt entry still names its output as a string.
+    assert!(orphan.get("output").is_none(), "{orphan}");
+    for e in entries.iter().filter(|e| e["input_conditions"].is_null()) {
+        assert!(e["output"].as_str().is_some_and(|o| !o.is_empty()), "{e}");
+    }
     assert!(!out.join("nb-9-big").exists());
     assert_eq!(subdirs(&out).len(), 5, "{:?}", subdirs(&out));
 }
