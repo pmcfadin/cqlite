@@ -302,7 +302,14 @@ fn major_drops_expired_sstable_and_keeps_live() {
         "only the live SSTable was fed to the merger (expired dropped whole)"
     );
 
-    // R3: the dropped SSTable's components were reclaimed after publish.
+    // #4666: compaction alone removes NOTHING (the output is not published yet): a failed publish
+    // must lose no input.
+    assert!(
+        expired_path.exists(),
+        "compact_sstables must not remove a dropped-whole input before the caller publishes"
+    );
+    // R3: after the caller's publish it reclaims the dropped SSTable's components.
+    report.reclaim_dropped_inputs();
     assert!(
         !expired_path.exists(),
         "dropped-whole SSTable's Data.db must be reclaimed after publish"
