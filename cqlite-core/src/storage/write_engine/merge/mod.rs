@@ -235,9 +235,11 @@ pub(crate) use baseline::{
 #[cfg(feature = "write-support")]
 mod udt_normalization;
 #[cfg(feature = "write-support")]
+#[cfg(any(test, not(feature = "tombstones")))]
+pub(crate) use udt_normalization::apply_udt_marshals_from_inputs;
+#[cfg(feature = "write-support")]
 pub(crate) use udt_normalization::{
-    apply_udt_marshals_from_inputs, apply_udt_marshals_from_inputs_in,
-    effective_compaction_schema_in,
+    apply_udt_marshals_from_inputs_in, effective_compaction_schema_in,
 };
 #[cfg(feature = "write-support")]
 pub use udt_normalization::{

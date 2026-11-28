@@ -132,6 +132,7 @@ pub(crate) fn udt_columns_eligible_for_normalization_in(
 /// (`is_complex_column`) and round-trips the per-field UDT cells. Errors when an
 /// input set has an incompatible mixed encoding for a column (see
 /// [`UdtNormalizationPlan::conflicts`]) rather than silently corrupting data.
+#[cfg(any(test, not(feature = "tombstones")))]
 pub(crate) fn apply_udt_marshals_from_inputs(
     schema: &mut TableSchema,
     input_paths: &[PathBuf],

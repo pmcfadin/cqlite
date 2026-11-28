@@ -127,6 +127,7 @@ impl InputStats {
     /// Inputs that are already generations (a listing's), so the run shares the metadata cache of
     /// the caller's clones: `diagnose --deep` reads each `Statistics.db` once for the cheap tier,
     /// the deep scan and the dry compaction (GD9.1).
+    #[cfg(not(feature = "tombstones"))]
     pub(crate) fn from_generations(inputs: Vec<(PathBuf, Generation)>) -> Self {
         Self {
             inputs: inputs.into_iter().map(|(p, g)| (p, Some(g))).collect(),
