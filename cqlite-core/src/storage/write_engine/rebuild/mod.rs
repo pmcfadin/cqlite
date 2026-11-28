@@ -214,6 +214,10 @@ pub enum RefusalReason {
     /// BTI version). Refused from the filename before any component is opened (issue #4626, GD1);
     /// it is never a field classification, so no `lost` entry exists for it.
     UnsupportedVersion,
+    /// A `*-Data.db` in the table directory whose name the generation listing does not recognise
+    /// as an SSTable component (for example `nb-x-big-Data.db`). It is named, never silently
+    /// dropped (G13), and refuses the run before anything is built.
+    UnrecognisedName,
 }
 
 /// A refusal: nothing was written (design D3). Distinct from a usage error
@@ -394,6 +398,36 @@ impl RebuildReport {
         }
     }
 
+    /// The refused manifest entry for a `*-Data.db` the listing does not recognise. There is no
+    /// generation behind it, so no `output` and no format are known.
+    pub fn for_unrecognised_file(input: &std::path::Path, requested: &[Component]) -> Self {
+        Self {
+            input: input.display().to_string(),
+            output: String::new(),
+            format: "unknown".to_string(),
+            compressed_input: false,
+            input_conditions: Vec::new(),
+            requested: requested
+                .iter()
+                .map(|c| c.manifest_label().to_string())
+                .collect(),
+            regenerated: Vec::new(),
+            skipped_not_applicable: Vec::new(),
+            classification: BTreeMap::new(),
+            refused: Some(Refusal {
+                reason: RefusalReason::UnrecognisedName,
+                remedy: "its name is not an SSTable component name (<version>-<id>-<format>-Data.db \
+                         with a valid id), so rebuild cannot tell which generation it is; rename or \
+                         remove it and re-run"
+                    .to_string(),
+                offset: None,
+            }),
+            rolled_back: false,
+            now: chrono::Utc::now().to_rfc3339(),
+            cqlite_version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+
     /// The refusal for a generation below the version floor, naming the version and the floor.
     pub fn unsupported_version_refusal(
         generation: &crate::storage::sstable::generation::Generation,
@@ -416,6 +450,7 @@ impl RefusalReason {
             RefusalReason::DataCorrupt => "data-corrupt",
             RefusalReason::ReencodeMismatch => "reencode-mismatch",
             RefusalReason::UnsupportedVersion => "unsupported-version",
+            RefusalReason::UnrecognisedName => "unrecognised-name",
         }
     }
 }

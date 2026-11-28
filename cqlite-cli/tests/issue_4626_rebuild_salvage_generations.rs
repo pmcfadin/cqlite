@@ -664,3 +664,42 @@ fn an_explicit_file_is_refused_by_name_for_each_module_condition() {
         err_text(&o)
     );
 }
+
+/// G13: a malformed SSTable-like `nb-x-big-Data.db` beside a valid generation is named in a
+/// refusal (exit 2, R7) before anything is built: no `--out`, and the valid generation is
+/// reported rolled back. A non-SSTable file (`notes.txt`) beside it stays ignored.
+#[test]
+fn an_unrecognised_data_db_refuses_the_run_by_name() {
+    let root = TempDir::new().unwrap();
+    let dir = one_generation_dir(root.path());
+    std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+    let schema = schema_file(root.path(), "snap_backup");
+    let out = root.path().join("out");
+    let m = root.path().join("m.json");
+
+    // Control: with only the ignorable file the run succeeds.
+    let ok = rebuild(&schema, &dir, &out, &m, "digest");
+    assert_eq!(ok.status.code(), Some(0), "{}", err_text(&ok));
+    std::fs::remove_dir_all(&out).unwrap();
+
+    std::fs::write(dir.join("nb-x-big-Data.db"), b"x").unwrap();
+    let o = rebuild(&schema, &dir, &out, &m, "digest");
+    assert_eq!(o.status.code(), Some(2), "{}", err_text(&o));
+    assert!(
+        err_text(&o).contains("nb-x-big-Data.db"),
+        "{}",
+        err_text(&o)
+    );
+    assert!(!out.exists(), "--out must never be created");
+    let entries = manifest(&m);
+    let refused: Vec<&Value> = entries.iter().filter(|e| !e["refused"].is_null()).collect();
+    assert_eq!(refused.len(), 1, "{entries:?}");
+    assert_eq!(refused[0]["refused"]["reason"], "unrecognised-name");
+    assert!(refused[0]["input"]
+        .as_str()
+        .unwrap()
+        .ends_with("nb-x-big-Data.db"));
+    for e in entries.iter().filter(|e| e["refused"].is_null()) {
+        assert_eq!(e["rolled_back"], true, "{e}");
+    }
+}

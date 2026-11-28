@@ -127,6 +127,9 @@ struct Plan {
     items: Vec<Planned>,
     /// Orphans (`Data.db` missing or zero-length): named in the manifest, never rebuilt.
     orphans: Vec<Generation>,
+    /// `*-Data.db` files the listing ignores (not an SSTable component name): they refuse the run
+    /// by name, never silently dropped (G13).
+    unrecognised: Vec<PathBuf>,
 }
 
 /// Resolve `input` into the generation(s) to rebuild. A single `Data.db` file is returned as-is;
@@ -139,6 +142,7 @@ fn plan_generations(input: &Path) -> anyhow::Result<Plan> {
         return Ok(Plan {
             items: vec![Planned::File(input.to_path_buf())],
             orphans: Vec::new(),
+            unrecognised: Vec::new(),
         });
     }
     if !input.is_dir() {
@@ -152,6 +156,17 @@ fn plan_generations(input: &Path) -> anyhow::Result<Plan> {
     Ok(Plan {
         items: listing.live.into_iter().map(Planned::Listed).collect(),
         orphans: listing.orphans,
+        // Other ignored files (`.gitignore`, `notes.txt`) are not SSTable-like and stay ignored.
+        unrecognised: listing
+            .ignored
+            .into_iter()
+            .filter(|p| {
+                p.is_file()
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.ends_with("-Data.db"))
+            })
+            .collect(),
     })
 }
 
@@ -355,6 +370,7 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
     let Plan {
         items: generations,
         orphans,
+        unrecognised,
     } = match plan_generations(&args.input) {
         Ok(p) => p,
         Err(e) => {
@@ -362,37 +378,15 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
             std::process::exit(1);
         }
     };
-    if generations.is_empty() {
-        // Nothing live to rebuild. Orphans are still named in the manifest (GD4). The exit is 1:
-        // R7 allows only 0 (every requested component regenerated), 2 (a generation REFUSED) and
-        // 1 (a usage error, cause on stderr), with no partial-success code (design D3); nothing was
-        // rebuilt and nothing was refused, so this is the usage error "the input has no live
-        // generation", exactly as an empty directory already is.
-        if !orphans.is_empty() {
-            let reports = orphan_reports(&orphans, &components);
-            if let Err(e) = render_and_write_reports(&reports, true, args) {
-                eprintln!("cqlite rebuild: failed to write report: {e:#}");
-            }
-        }
-        eprintln!(
-            "cqlite rebuild: no live *-Data.db found under {}{}",
-            args.input.display(),
-            if orphans.is_empty() {
-                ""
-            } else {
-                " (only Orphans, reported in the manifest and not rebuilt)"
-            }
-        );
-        std::process::exit(1);
-    }
-
-    // GD4 / R7.4: a below-floor generation refuses the whole run, decided from the listing's
-    // descriptors BEFORE anything is built, so `--out` is never created for this refusal. The
+    // GD4 / R7.4 / G13: a below-floor generation, or a `*-Data.db` the listing does not
+    // recognise, refuses the whole run (R7: exit 2 = REFUSED, nothing written; there is no partial
+    // code), decided from the listing BEFORE anything is built, so `--out` is never created for this refusal. The
     // other live generations are reported rolled back (nothing regenerated), the same shape R9
     // gives a rolled-back entry.
-    if generations
-        .iter()
-        .any(|p| matches!(p, Planned::Listed(g) if g.below_floor().is_some()))
+    if !unrecognised.is_empty()
+        || generations
+            .iter()
+            .any(|p| matches!(p, Planned::Listed(g) if g.below_floor().is_some()))
     {
         let mut reports = Vec::new();
         for planned in &generations {
@@ -418,12 +412,43 @@ pub async fn execute_rebuild_command(schema_path: Option<&Path>, args: &RebuildA
             }
             reports.push(report);
         }
+        for path in &unrecognised {
+            eprintln!(
+                "cqlite rebuild: refusing the run: {} is not an SSTable component name",
+                path.display()
+            );
+            reports.push(RebuildReport::for_unrecognised_file(path, &components));
+        }
         reports.extend(orphan_reports(&orphans, &components));
         if let Err(e) = render_and_write_reports(&reports, true, args) {
             eprintln!("cqlite rebuild: failed to write report: {e:#}");
             std::process::exit(1);
         }
         std::process::exit(2);
+    }
+
+    if generations.is_empty() {
+        // Nothing live to rebuild. Orphans are still named in the manifest (GD4). The exit is 1:
+        // R7 allows only 0 (every requested component regenerated), 2 (a generation REFUSED) and
+        // 1 (a usage error, cause on stderr), with no partial-success code (design D3); nothing was
+        // rebuilt and nothing was refused, so this is the usage error "the input has no live
+        // generation", exactly as an empty directory already is.
+        if !orphans.is_empty() {
+            let reports = orphan_reports(&orphans, &components);
+            if let Err(e) = render_and_write_reports(&reports, true, args) {
+                eprintln!("cqlite rebuild: failed to write report: {e:#}");
+            }
+        }
+        eprintln!(
+            "cqlite rebuild: no live *-Data.db found under {}{}",
+            args.input.display(),
+            if orphans.is_empty() {
+                ""
+            } else {
+                " (only Orphans, reported in the manifest and not rebuilt)"
+            }
+        );
+        std::process::exit(1);
     }
 
     let mut reports = Vec::with_capacity(generations.len());
