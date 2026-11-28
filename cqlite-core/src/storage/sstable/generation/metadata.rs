@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use super::model::{Condition, Generation};
+#[cfg(feature = "write-support")]
+use super::name::check_floor;
 use crate::error::{Error, Result};
 use crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback_detailed;
 #[cfg(feature = "write-support")]
@@ -154,16 +156,33 @@ pub(crate) struct DirectStatistics {
 
 #[cfg(feature = "write-support")]
 pub(crate) fn read_direct(path: &Path) -> std::result::Result<DirectStatistics, MetadataFailure> {
-    let gates = match VersionGates::from_path(path) {
-        Ok(g) => Some(g),
-        Err(Error::UnsupportedVersion { version, .. }) => {
-            let bti = path.to_string_lossy().contains("-bti-");
-            return Err(MetadataFailure::UnsupportedVersion {
-                version,
-                floor: if bti { "da" } else { "na" },
-            });
+    // The format and version come from the FILE NAME's parsed descriptor, the parser the rest of
+    // the module uses, never from the directory path. A name with no parseable descriptor has no
+    // authoritative version, so it gets no gates and the parser's nb-compatible defaults (as
+    // `StatisticsReader::open` does); guessing a format from other text would be a heuristic (#28).
+    let descriptor = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(super::name::parse_component_name);
+    let gates = match descriptor {
+        None => None,
+        Some(d) => {
+            if let Err(below) = check_floor(&d.version, d.format) {
+                return Err(MetadataFailure::UnsupportedVersion {
+                    version: below.version,
+                    floor: below.floor,
+                });
+            }
+            match d.format {
+                SsTableFormat::Big => {
+                    BigVersionGates::from_version(&d.version).map(VersionGates::Big)
+                }
+                SsTableFormat::Bti => {
+                    BtiVersionGates::from_version(&d.version).map(VersionGates::Bti)
+                }
+            }
+            .ok()
         }
-        Err(_) => None,
     };
     let bytes = read_checked(path).map_err(|e| classify_read_error(path, e))?;
     let corrupt = |e: Error| MetadataFailure::Corrupt {
@@ -448,5 +467,23 @@ mod tests {
         let (_dir, generation) = one_generation("nb-1-big", None);
         let failure = generation.trusted_metadata_with(&forbidden).unwrap_err();
         assert_eq!(failure.condition(), Condition::Absent);
+    }
+
+    /// The direct read's floor follows the file name's descriptor, not a `-bti-` in the directory.
+    #[cfg(feature = "write-support")]
+    #[test]
+    fn direct_read_floor_comes_from_the_file_name_not_the_directory() {
+        let dir = tempfile::tempdir().unwrap().keep().join("x-bti-y");
+        std::fs::create_dir_all(&dir).unwrap();
+        match read_direct(&dir.join("ma-1-big-Statistics.db")) {
+            Err(MetadataFailure::UnsupportedVersion { version, floor }) => {
+                assert_eq!((version.as_str(), floor), ("ma", "na"));
+            }
+            other => panic!("expected the BIG floor, got {other:?}"),
+        }
+        match read_direct(&dir.join("na-1-bti-Statistics.db")) {
+            Err(MetadataFailure::UnsupportedVersion { floor, .. }) => assert_eq!(floor, "da"),
+            other => panic!("expected the BTI floor, got {other:?}"),
+        }
     }
 }
