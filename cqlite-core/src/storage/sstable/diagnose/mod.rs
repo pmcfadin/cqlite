@@ -214,8 +214,12 @@ pub struct UnreadableGeneration {
 /// Run `diagnose` over every SSTable generation directly under `table_dir`
 /// (spec R1-R5, plus R3/R4 under `--deep`).
 pub async fn diagnose_table(table_dir: &Path, options: &DiagnoseOptions) -> Result<DiagnoseReport> {
-    diagnose_table_with(table_dir, options, &read_checked_statistics).await
+    diagnose_table_with(table_dir, options, Arc::new(read_checked_statistics)).await
 }
+
+/// The injected `Statistics.db` read. `Send + Sync + 'static` so the (blocking) load can run off
+/// the async executor and the diagnose futures stay `Send`.
+pub type StatisticsRead = Arc<dyn Fn(&Path) -> Result<Vec<u8>> + Send + Sync>;
 
 /// [`diagnose_table`] with the one `Statistics.db` read injected, so a test can count opens (GD9).
 /// Every `Statistics.db` field the run reports comes through this read, once per generation.
@@ -223,7 +227,7 @@ pub async fn diagnose_table(table_dir: &Path, options: &DiagnoseOptions) -> Resu
 pub async fn diagnose_table_with(
     table_dir: &Path,
     options: &DiagnoseOptions,
-    read: &dyn Fn(&Path) -> Result<Vec<u8>>,
+    read: StatisticsRead,
 ) -> Result<DiagnoseReport> {
     // GD8: Scope Live, `TocMissing` accepted. A directory the module cannot resolve (an
     // inconsistent transaction state, an unlistable directory) is a usage error (exit 1).
@@ -273,7 +277,7 @@ pub async fn diagnose_table_with(
             gc_before,
             &config,
             platform.clone(),
-            read,
+            &read,
         )
         .await
         {
@@ -428,7 +432,7 @@ async fn diagnose_generation(
     gc_before: Option<i64>,
     config: &Config,
     platform: Arc<Platform>,
-    read: &dyn Fn(&Path) -> Result<Vec<u8>>,
+    read: &StatisticsRead,
 ) -> std::result::Result<(GenerationDiagnosis, Option<(i64, i64)>), String> {
     // GD8, GD9: the floor, the bounded read, the strict integrity check (#4612) and the one parse
     // are the generation's trusted-metadata accessor. A failure becomes this generation's
@@ -436,8 +440,17 @@ async fn diagnose_generation(
     let named = |failure: crate::storage::sstable::generation::MetadataFailure| {
         format!("{}: {failure}", failure.condition())
     };
-    let stats = generation.trusted_metadata_via(read).map_err(named)?;
-    let facts = generation.statistics_facts_via(read).map_err(named)?;
+    // The read is blocking (up to MAX_STATISTICS_BYTES), so it runs on the blocking pool. The
+    // generation's cache is shared by the clone: still one read per generation (GD9), and the
+    // buffer is dropped inside the loader.
+    let (g, r) = (generation.clone(), read.clone());
+    let (stats, facts) = tokio::task::spawn_blocking(move || {
+        let stats = g.trusted_metadata_via(&*r).map_err(named)?;
+        let facts = g.statistics_facts_via(&*r).map_err(named)?;
+        Ok::<_, String>((stats, facts))
+    })
+    .await
+    .map_err(|e| format!("Statistics.db load task failed: {e}"))??;
     diagnose_loaded_generation(
         generation, data_path, options, gc_before, config, platform, &stats, &facts,
     )

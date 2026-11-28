@@ -597,3 +597,55 @@ fn diff_accepts_a_snapshot_directory_as_a_side() {
         "{first}"
     );
 }
+
+/// Roborev round 2 (1): a side holding ONLY orphans still resolves as a table directory, so diff
+/// refuses it as an orphan (exit 2, `side=`, the orphan named), not as "no such table" (exit 1).
+#[test]
+fn diff_refuses_an_orphan_only_side_naming_it() {
+    let tmp = TempDir::new().unwrap();
+    let schema = schema_file(tmp.path(), "snap_backup");
+    let a = single_generation_side(tmp.path(), "a");
+    let b = single_generation_side(tmp.path(), "b");
+    std::fs::remove_file(b.join("nb-1-big-Data.db")).unwrap();
+    let o = diff(&a, &b, &schema);
+    assert_eq!(o.status.code(), Some(2), "{}", err(&o));
+    assert!(
+        err(&o).contains("side=b")
+            && err(&o).contains("nb-1-big-Data.db")
+            && err(&o).contains("Orphan"),
+        "{}",
+        err(&o)
+    );
+}
+
+/// Same directory under `explain`: nothing live to explain is a usage error (exit 1), after the
+/// orphan has been named on stderr (GD5.1: named, not listed).
+#[test]
+fn explain_on_an_orphan_only_directory_names_it_and_has_nothing_to_explain() {
+    let root = TempDir::new().unwrap();
+    let dir = seeded(root.path(), "snap_backup", "snap_backup");
+    for i in 2..=5 {
+        for c in [
+            "Data.db",
+            "TOC.txt",
+            "Statistics.db",
+            "Index.db",
+            "Filter.db",
+            "Summary.db",
+            "CompressionInfo.db",
+            "Digest.crc32",
+        ] {
+            std::fs::remove_file(dir.join(format!("nb-{i}-big-{c}"))).unwrap();
+        }
+    }
+    std::fs::remove_file(dir.join("nb-1-big-Data.db")).unwrap();
+    let schema = schema_file(root.path(), "snap_backup");
+    let o = explain(root.path(), &schema, "snap_backup");
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    assert!(
+        err(&o).contains("nb-1-big-Data.db") && err(&o).contains("Orphan"),
+        "{}",
+        err(&o)
+    );
+    assert!(out(&o).is_empty());
+}

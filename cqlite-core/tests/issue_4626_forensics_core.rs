@@ -11,9 +11,9 @@ mod datasets_root;
 #[path = "support/generation_fixtures.rs"]
 mod generation_fixtures;
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use cqlite_core::storage::sstable::diagnose::{
     diagnose_table, diagnose_table_with, DiagnoseOptions,
@@ -52,17 +52,17 @@ fn copy_fixture(state: &str, table: &str) -> (TempDir, std::path::PathBuf) {
 #[tokio::test]
 async fn each_statistics_db_is_read_once_per_diagnose_run() {
     let (_root, dir) = copy_fixture("snap_backup", "snap_backup");
-    let opens: RefCell<BTreeMap<String, u32>> = RefCell::new(BTreeMap::new());
-    let counting = |path: &Path| {
-        *opens
-            .borrow_mut()
+    let opens: Arc<Mutex<BTreeMap<String, u32>>> = Arc::default();
+    let counter = opens.clone();
+    let counting = move |path: &Path| {
+        *counter
+            .lock()
+            .unwrap()
             .entry(path.file_name().unwrap().to_string_lossy().into_owned())
             .or_default() += 1;
         cqlite_core::storage::sstable::statistics_reader::integrity::read_checked_statistics(path)
     };
-    // Not `Send`-friendly closures cannot cross `.await` in a spawned task, but a current-thread
-    // test runtime polls this future in place.
-    let report = diagnose_table_with(&dir, &options(true), &counting)
+    let report = diagnose_table_with(&dir, &options(true), Arc::new(counting))
         .await
         .expect("diagnose --deep");
     assert_eq!(
@@ -71,12 +71,39 @@ async fn each_statistics_db_is_read_once_per_diagnose_run() {
         "{:?}",
         report.unreadable_generations
     );
-    let opens = opens.into_inner();
+    let opens = opens.lock().unwrap().clone();
     assert_eq!(opens.len(), 5, "{opens:?}");
     for (name, n) in &opens {
         assert!(name.ends_with("-Statistics.db"), "{name}");
         assert_eq!(*n, 1, "{name} was opened {n} times");
     }
+}
+
+/// Roborev round 2 (2): the public diagnose futures are `Send`, so a multithreaded runtime can
+/// spawn them. A compile-time assertion.
+#[tokio::test]
+async fn the_diagnose_futures_are_send() {
+    fn assert_send<T: Send>(_: &T) {}
+    let (_root, dir) = copy_fixture("snap_backup", "snap_backup");
+    let opts = options(false);
+    let fut = diagnose_table(&dir, &opts);
+    assert_send(&fut);
+    let fut2 = diagnose_table_with(
+        &dir,
+        &opts,
+        Arc::new(
+            cqlite_core::storage::sstable::statistics_reader::integrity::read_checked_statistics,
+        ),
+    );
+    assert_send(&fut2);
+    let report = tokio::spawn({
+        let dir = dir.clone();
+        async move { diagnose_table(&dir, &options(false)).await }
+    })
+    .await
+    .unwrap()
+    .expect("diagnose on a spawned task");
+    assert_eq!(report.generations.len(), 5);
 }
 
 /// GD8.1: `TocMissing` is carried onto the report, the generation is still diagnosed.

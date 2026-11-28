@@ -69,7 +69,9 @@ fn dir_name_matches_table(name: &str, table_name: &str) -> bool {
 fn has_live_generations(dir: &Path) -> Result<bool, String> {
     use cqlite_core::storage::sstable::generation::GenerationError;
     match list_live(dir) {
-        Ok(listing) => Ok(!listing.live.is_empty()),
+        // Orphans count: a directory holding only orphans is still a table directory, and the verb
+        // that lists it names them (diff refuses the side; explain has nothing live to explain).
+        Ok(listing) => Ok(!listing.live.is_empty() || !listing.orphans.is_empty()),
         Err(
             GenerationError::TxnInconsistent { .. }
             | GenerationError::TxnLogUnreadable { .. }
