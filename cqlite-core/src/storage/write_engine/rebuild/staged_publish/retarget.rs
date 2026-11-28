@@ -47,7 +47,6 @@ impl StagedPublish {
         };
         std::fs::create_dir_all(stage_parent)?;
         let stage = stage_parent.join(format!("{STAGE_PREFIX}{tag}{STAGE_SUFFIX}"));
-        // Built before any further check so `Drop` removes what this call created on a refusal.
         let mut this = Self {
             root: root.to_path_buf(),
             stage: stage.clone(),
@@ -58,7 +57,11 @@ impl StagedPublish {
             stage_parent: stage_parent.to_path_buf(),
             renumber: None,
             collided: None,
+            toc_last: true,
         };
+        // Disarmed (`Drop` removes nothing) until `create_dir` succeeds: a refusal, or an existing
+        // stage with the same tag, must never delete a directory this call did not create.
+        this.published = true;
         if policy == LeftoverPolicy::Refuse {
             if let Some(left) = find_leftover_in(stage_parent) {
                 return Err(Error::InvalidInput(format!(
@@ -70,7 +73,7 @@ impl StagedPublish {
             }
         }
         std::fs::create_dir(&stage)?;
-        this.stage = stage;
+        this.published = false; // armed: the stage is ours
         Ok(this)
     }
 
@@ -238,5 +241,63 @@ mod tests {
         StagedPublish::begin_in(tmp.path(), &t, "e", LeftoverPolicy::Ignore)
             .unwrap()
             .discard();
+    }
+
+    /// Round 2, High: a NEW SSTable (`begin_in`) publishes `TOC.txt` LAST, after the other
+    /// components are linked and the directory is fsynced. A fault injected immediately before
+    /// the TOC link leaves no `TOC.txt`, so no generation is ever published-looking.
+    #[test]
+    fn toc_is_linked_last_and_a_fault_before_it_publishes_nothing() {
+        use crate::storage::sstable::generation::{list_generations, Scope, TocPolicy};
+        let tmp = tempfile::tempdir().unwrap();
+        let t = table(tmp.path());
+        let mut stage =
+            StagedPublish::begin_in(tmp.path(), &t, "f", LeftoverPolicy::Refuse).unwrap();
+        stage_set(&stage, 3, "mine");
+        let mut ops = Vec::new();
+        let err = stage
+            .publish_observed(&mut |op| {
+                ops.push(format!("{op:?}"));
+                if matches!(op, super::super::Op::Rename(p) if p.ends_with("nb-3-big-TOC.txt")) {
+                    return Err(Error::Storage("injected fault before the TOC link".into()));
+                }
+                Ok(())
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("injected"), "{err}");
+        assert!(!t.join("nb-3-big-TOC.txt").exists(), "TOC must not exist");
+        // Everything else was linked before the TOC, and a directory fsync preceded it.
+        let toc_at = ops.iter().position(|o| o.contains("TOC.txt")).unwrap();
+        assert!(ops[..toc_at].iter().any(|o| o.contains("Data.db")));
+        assert!(ops[toc_at - 1].starts_with("SyncDir"), "{ops:?}");
+        // No reader sees a TOC without its Data.db; nothing carries a TOC at all.
+        let listing = list_generations(&t, &Scope::Live, TocPolicy::Accept).unwrap();
+        for g in listing.live.iter().chain(listing.orphans.iter()) {
+            assert!(
+                g.component_path("TOC.txt").is_none(),
+                "{} has a TOC",
+                g.base_name()
+            );
+        }
+    }
+
+    /// Round 2, Low: refusing because a stage with the same tag already exists must not delete
+    /// that pre-existing stage (the failed `begin_in` must not own its cleanup).
+    #[test]
+    fn a_preexisting_same_tag_stage_survives_the_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = table(tmp.path());
+        let theirs = t.join(".cqlite-publish-same.tmp");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("keep.txt"), "other writer").unwrap();
+        for policy in [LeftoverPolicy::Refuse, LeftoverPolicy::Ignore] {
+            assert!(StagedPublish::begin_in(tmp.path(), &t, "same", policy).is_err());
+            assert_eq!(
+                std::fs::read_to_string(theirs.join("keep.txt")).unwrap(),
+                "other writer",
+                "{policy:?}"
+            );
+        }
     }
 }

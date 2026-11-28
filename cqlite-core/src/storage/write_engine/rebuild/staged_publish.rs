@@ -107,6 +107,9 @@ pub struct StagedPublish {
     renumber: Option<(u64, u64)>,
     /// Set when `publish` stopped because a final name already existed (nothing of ours left behind).
     collided: Option<PathBuf>,
+    /// Publish `TOC.txt` LAST (a NEW SSTable: CQLite's publication barrier, `writer/finish.rs`)
+    /// instead of `Data.db` last (`rebuild`/`salvage`; see the module doc). `begin_in` sets it.
+    toc_last: bool,
 }
 
 /// A filesystem operation of the publish window, reported to a test observer.
@@ -156,6 +159,7 @@ impl StagedPublish {
             stage_parent: root.to_path_buf(),
             renumber: None,
             collided: None,
+            toc_last: false,
         })
     }
 
@@ -184,7 +188,12 @@ impl StagedPublish {
             )));
         }
         // Publish order: everything else, then TOC.txt, then Data.db (see the module doc).
-        staged.sort_by(|a, b| rank(&a.1).cmp(&rank(&b.1)).then_with(|| a.1.cmp(&b.1)));
+        let toc_last = self.toc_last;
+        staged.sort_by(|a, b| {
+            rank_in(toc_last, &a.1)
+                .cmp(&rank_in(toc_last, &b.1))
+                .then_with(|| a.1.cmp(&b.1))
+        });
         // Pre-flight: a collision refuses with nothing renamed (the stage is removed by `Drop`).
         for (_, rel) in &staged {
             let dest = self.dest_of(rel);
@@ -221,7 +230,10 @@ impl StagedPublish {
         // without iterator search primitives so the R2.3 no-resync-scan guard
         // (scripts/tests/test_rebuild_no_resync_scan.sh) stays exact; this ranks file NAMES, it never
         // scans Data.db bytes.
-        let split = staged.iter().take_while(|(_, r)| rank(r) != 2).count();
+        let split = staged
+            .iter()
+            .take_while(|(_, r)| rank_in(toc_last, r) != 2)
+            .count();
         // From here a failure may leave final-named files: keep the stage as the leftover marker.
         self.publication_started = true;
         // The stage marker must be durable BEFORE any final name can be: fsync the stage directory
@@ -355,6 +367,21 @@ fn dir_chain(dir: &Path, floor: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// Publish rank: 2 is the LAST file (and the one the pre-publish directory barrier precedes).
+/// `toc_last`: `TOC.txt` is last and `Data.db` is an ordinary component; otherwise `Data.db` is
+/// last and `TOC.txt` second to last.
+fn rank_in(toc_last: bool, rel: &Path) -> u8 {
+    if !toc_last {
+        return rank(rel);
+    }
+    let name = rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if name.ends_with("-TOC.txt") {
+        2
+    } else {
+        0
+    }
 }
 
 fn rank(rel: &Path) -> u8 {

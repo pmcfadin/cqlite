@@ -264,3 +264,26 @@ fn help_states_the_generation_default() {
         "{flat}"
     );
 }
+
+/// Round 2: compact stages in its own table directory and checks only there, so another table's
+/// stage leftover under the same `--output` root neither blocks it nor is touched.
+#[test]
+fn an_unrelated_tables_leftover_stage_does_not_block_compact() {
+    let tmp = TempDir::new().unwrap();
+    let schema = schema_file(tmp.path());
+    let input = seeded_table(&tmp.path().join("in"), "snap_backup_live_low");
+    let root = tmp.path().join("root");
+    let other = root
+        .join("ks2")
+        .join("other")
+        .join(".cqlite-publish-old.tmp");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("x"), b"x").unwrap();
+    let o = compact(&input, &root, &schema, &[]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(root.join("gd4626/snap_backup/nb-1-big-TOC.txt").is_file());
+    assert!(
+        other.join("x").is_file(),
+        "the other table's stage is untouched"
+    );
+}

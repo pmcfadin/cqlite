@@ -51,14 +51,11 @@ pub(crate) async fn compact_and_publish(
 
     let dest_dir = args.output.join(&schema.keyspace).join(&schema.table);
     let generation = resolve_generation(&dest_dir, args.generation)?;
-    let stage = StagedPublish::begin(&args.output, &format!("compact-{generation}")).with_context(
-        || {
-            format!(
-                "cannot stage compaction output under {}",
-                args.output.display()
-            )
-        },
-    )?;
+    // The stage lives in the destination TABLE directory (unique tag, so concurrent compactions
+    // do not share a stage name) and only that directory is checked for a leftover stage.
+    let tag = format!("compact-{}-{generation}", std::process::id());
+    let stage = StagedPublish::begin_in(&args.output, &dest_dir, &tag, LeftoverPolicy::Refuse)
+        .with_context(|| format!("cannot stage compaction output in {}", dest_dir.display()))?;
     let report = cqlite_core::storage::write_engine::merge::compact_sstables_with_registry(
         inputs,
         stage.dir(),
