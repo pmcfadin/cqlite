@@ -46,9 +46,8 @@ fn copy_fixture(state: &str, table: &str) -> (TempDir, std::path::PathBuf) {
 /// R4's overlap and R3's scan) each `*-Statistics.db` is opened exactly once by the diagnose
 /// code, and every generation was in fact read.
 ///
-/// Scope: the shim sees the reads diagnose makes. `SSTableReader::open` (the deep scan) and the
-/// merge's dry compaction read `Statistics.db` through their own paths, which belong to phase 5
-/// (task 5.1) and are not counted here.
+/// Scope: the shim sees the reads the accessor makes; the next test proves the deep scan's
+/// `SSTableReader::open` makes none of its own (phase 5, task 5.1).
 #[tokio::test]
 async fn each_statistics_db_is_read_once_per_diagnose_run() {
     let (_root, dir) = copy_fixture("snap_backup", "snap_backup");
@@ -77,6 +76,54 @@ async fn each_statistics_db_is_read_once_per_diagnose_run() {
         assert!(name.ends_with("-Statistics.db"), "{name}");
         assert_eq!(*n, 1, "{name} was opened {n} times");
     }
+}
+
+/// GD9.1, phase 5: the `--deep` scan opens each generation's `SSTableReader`, which used to read
+/// `Statistics.db` again. The shim serves the pristine bytes from a backup directory while the
+/// files on disk are overwritten with garbage, so any read that bypasses the accessor's cache
+/// fails the generation (Corrupt) instead of passing silently. Every generation must still carry
+/// its `--deep` report, and the shim must have been called exactly once per file.
+#[tokio::test]
+async fn deep_scan_reads_no_statistics_db_of_its_own() {
+    let (_root, dir) = copy_fixture("snap_backup", "snap_backup");
+    let backup = tempfile::tempdir().unwrap();
+    for e in std::fs::read_dir(&dir).unwrap().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.ends_with("-Statistics.db") {
+            std::fs::copy(e.path(), backup.path().join(&name)).unwrap();
+            std::fs::write(e.path(), b"not a Statistics.db").unwrap();
+        }
+    }
+    let opens: Arc<Mutex<BTreeMap<String, u32>>> = Arc::default();
+    let counter = opens.clone();
+    let served = backup.path().to_path_buf();
+    let counting = move |path: &Path| {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        *counter.lock().unwrap().entry(name.clone()).or_default() += 1;
+        cqlite_core::storage::sstable::statistics_reader::integrity::read_checked_statistics(
+            &served.join(name),
+        )
+    };
+    let report = diagnose_table_with(&dir, &options(true), Arc::new(counting))
+        .await
+        .expect("diagnose --deep");
+    assert_eq!(
+        report.generations.len(),
+        5,
+        "{:?}",
+        report.unreadable_generations
+    );
+    for g in &report.generations {
+        let deep = g.deep.as_ref().expect("every generation carries --deep");
+        assert!(
+            deep.rows_scanned > 0,
+            "generation {} scanned no rows",
+            g.generation
+        );
+    }
+    let opens = opens.lock().unwrap().clone();
+    assert_eq!(opens.len(), 5, "{opens:?}");
+    assert!(opens.values().all(|&n| n == 1), "{opens:?}");
 }
 
 /// Roborev round 2 (2): the public diagnose futures are `Send`, so a multithreaded runtime can

@@ -4954,6 +4954,7 @@ mod tests {
         let mut bytes = std::fs::read(&stats_path).expect("read stats");
         let count = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
         let mut stats_offset = None;
+        let mut offsets = Vec::new();
         for i in 0..count {
             let entry = 8 + i * 8; // after count(4)+CRC(4); each entry = type(4)+offset(4)
             let ty = u32::from_be_bytes([
@@ -4962,6 +4963,12 @@ mod tests {
                 bytes[entry + 2],
                 bytes[entry + 3],
             ]);
+            offsets.push(u32::from_be_bytes([
+                bytes[entry + 4],
+                bytes[entry + 5],
+                bytes[entry + 6],
+                bytes[entry + 7],
+            ]) as usize);
             if ty == 2 {
                 stats_offset = Some(u32::from_be_bytes([
                     bytes[entry + 4],
@@ -4974,6 +4981,17 @@ mod tests {
         let off = stats_offset.expect("STATS component (type 2) in TOC");
         // Negative bucket count → skip_estimated_histogram returns Corruption.
         bytes[off..off + 4].copy_from_slice(&(-1i32).to_be_bytes());
+        // Re-sign the STATS component (its body is followed by a CRC32 of the body, up to the
+        // next component or the end of the file): the file now passes the strict #4612 integrity
+        // check the generation module applies, so only the STATS-extras decode is undecodable.
+        let end = offsets
+            .iter()
+            .copied()
+            .filter(|&o| o > off)
+            .min()
+            .unwrap_or(bytes.len());
+        let crc = crc32fast::hash(&bytes[off..end - 4]);
+        bytes[end - 4..end].copy_from_slice(&crc.to_be_bytes());
         std::fs::write(&stats_path, &bytes).expect("rewrite corrupted stats");
 
         let (_ts, baseline_ldt, _ttl) = compute_baseline_min(&[data_path]);
