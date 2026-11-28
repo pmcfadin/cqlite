@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn data_db_is_renamed_last_and_toc_second_to_last() {
-        let mut v = vec![
+        let mut v = [
             PathBuf::from("ks/t/nb-1-big-Data.db"),
             PathBuf::from("ks/t/nb-1-big-TOC.txt"),
             PathBuf::from("ks/t/nb-1-big-Index.db"),

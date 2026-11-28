@@ -91,8 +91,16 @@ fn compact_never_reads_snapshots_or_backups() {
     let out_full = tmp.path().join("out_full");
     let o = compact(&full, &out_full, &schema, &[]);
     assert!(o.status.success(), "{}", stderr(&o));
-    assert!(stdout(&o).contains("compacted 5 SSTable(s)"), "{}", stdout(&o));
-    assert_eq!(before, content_signature(&full), "compact modified its input");
+    assert!(
+        stdout(&o).contains("compacted 5 SSTable(s)"),
+        "{}",
+        stdout(&o)
+    );
+    assert_eq!(
+        before,
+        content_signature(&full),
+        "compact modified its input"
+    );
 
     let out_stripped = tmp.path().join("out_stripped");
     let o2 = compact(&stripped, &out_stripped, &schema, &[]);
@@ -129,18 +137,31 @@ fn compact_refuses_unsupported_formats_and_id_forms_by_name() {
     let da = corpus_table("test_da", "simple_table");
     let uuid_dir = fixture_table("uuid_ids", "uuid_mixed");
     let cases: [(&str, PathBuf, &str, &str); 3] = [
-        ("uuid", uuid_dir, "nb-3h5t_0i6r_2dipm2lxu6305iz8wl-big", "UUID"),
+        (
+            "uuid",
+            uuid_dir,
+            "nb-3h5t_0i6r_2dipm2lxu6305iz8wl-big",
+            "UUID",
+        ),
         ("oa", oa, "oa-2-big", "unsupported version oa"),
         ("da", da, "da-2-bti", "unsupported format bti"),
     ];
     for (label, src, refused, why) in cases {
-        let dir = tmp.path().join(format!("in_{label}")).join("gd4626").join("snap_backup");
+        let dir = tmp
+            .path()
+            .join(format!("in_{label}"))
+            .join("gd4626")
+            .join("snap_backup");
         if label == "uuid" {
             copy_dir(&src, &dir);
         } else {
             // a real nb generation beside the foreign one
             copy_dir(&fixture_table("snap_backup_live_low", "snap_backup"), &dir);
-            let base = if label == "oa" { "oa-2-big" } else { "da-2-bti" };
+            let base = if label == "oa" {
+                "oa-2-big"
+            } else {
+                "da-2-bti"
+            };
             copy_generation_as(&src, base, &dir, base);
         }
         let out = tmp.path().join(format!("out_{label}"));
@@ -190,7 +211,10 @@ fn explicit_generation_onto_an_existing_name_is_refused() {
     let o = compact(&live, &root, &schema, &["--generation", "1"]);
     assert!(!o.status.success());
     let err = stderr(&o);
-    assert!(err.contains("nb-1-big") && err.contains("already in use"), "{err}");
+    assert!(
+        err.contains("nb-1-big") && err.contains("already in use"),
+        "{err}"
+    );
     assert_eq!(before, content_signature(&root), "refusal wrote something");
 
     let o = compact(&live, &root, &schema, &["--generation", "2147483648"]);

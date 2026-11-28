@@ -94,8 +94,7 @@ async fn flush_and_name(engine: &mut WriteEngine, dir: &Path) -> String {
     after
         .iter()
         .map(|(n, _)| n.clone())
-        .filter(|n| n.ends_with("-Data.db") && !before.iter().any(|(b, _)| b == n))
-        .next()
+        .find(|n| n.ends_with("-Data.db") && !before.iter().any(|(b, _)| b == n))
         .expect("flush published a new Data.db")
 }
 
@@ -121,7 +120,12 @@ async fn flush_allocates_above_every_format_and_version() {
     );
     let uuid = fixture_table("uuid_ids", "uuid_mixed");
     copy_generation_as(&uuid, "nb-1-big", &dir, "nb-1-big");
-    copy_generation_as(&uuid, "nb-3h5t_0i6r_2dipm2lxu6305iz8wl-big", &dir, "nb-3h5t_0i6r_2dipm2lxu6305iz8wl-big");
+    copy_generation_as(
+        &uuid,
+        "nb-3h5t_0i6r_2dipm2lxu6305iz8wl-big",
+        &dir,
+        "nb-3h5t_0i6r_2dipm2lxu6305iz8wl-big",
+    );
     let before = tree_signature(&dir);
 
     let mut engine = engine_at(tmp.path()).expect("engine");
@@ -183,7 +187,7 @@ fn allocation_at_the_int_limit_is_refused() {
         &dir,
         "nb-2147483647-big",
     );
-    let err = engine_at(tmp.path()).err().expect("must refuse").to_string();
+    let err = engine_at(tmp.path()).expect_err("must refuse").to_string();
     assert!(err.contains("2147483647"), "{err}");
 }
 
@@ -218,7 +222,7 @@ async fn a_flush_past_the_int_limit_is_refused() {
     let name = flush_and_name(&mut engine, &dir).await;
     assert_eq!(name, "nb-2147483647-big-Data.db");
     engine.write(row(2)).expect("write");
-    let err = engine.flush().await.err().expect("must refuse").to_string();
+    let err = engine.flush().await.expect_err("must refuse").to_string();
     assert!(err.contains("2147483647"), "{err}");
     assert!(!dir.join("nb-2147483648-big-Data.db").exists());
 }

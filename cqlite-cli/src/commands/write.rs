@@ -372,9 +372,10 @@ impl CompactResult {
 /// Handle the `compact` subcommand: one-shot, policy-free compaction of an
 /// explicit set of input SSTables into a single output SSTable (Issue #842).
 ///
-/// Reads the published `nb-*-big-Data.db` files under `args.input_dir`
-/// (newest-generation first, so the newest run wins last-write-wins ties),
-/// merges them, and writes the result under `args.output`.
+/// Reads the live `nb-*-big` generations of the ONE table directory `args.input_dir`
+/// (newest-generation first, so the newest run wins last-write-wins ties; see
+/// `sstable_inputs`), merges them, and publishes the result under `args.output`
+/// without ever overwriting an existing SSTable (#4623).
 ///
 /// `args.gc_before` / `args.now_sec` are threaded into the merge for
 /// deterministic purge decisions but are not yet applied (issues #845/#848).
@@ -422,7 +423,8 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
     // #4623: the output id is the module's next id unless given, and an id that an existing
     // SSTable of the destination directory already uses is refused BEFORE any byte is written.
     let dest_dir = args.output.join(&schema.keyspace).join(&schema.table);
-    let generation = crate::commands::compact_output::resolve_generation(&dest_dir, args.generation)?;
+    let generation =
+        crate::commands::compact_output::resolve_generation(&dest_dir, args.generation)?;
 
     // Publish through `StagedPublish` (#4623): the writers fill a stage under `--output`, and
     // `publish` refuses with nothing renamed if any final name already exists.
@@ -430,7 +432,12 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
         &args.output,
         &format!("compact-{generation}"),
     )
-    .with_context(|| format!("cannot stage compaction output under {}", args.output.display()))?;
+    .with_context(|| {
+        format!(
+            "cannot stage compaction output under {}",
+            args.output.display()
+        )
+    })?;
     let report = cqlite_core::storage::write_engine::merge::compact_sstables_with_registry(
         inputs,
         stage.dir(),

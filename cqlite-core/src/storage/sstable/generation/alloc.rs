@@ -57,9 +57,7 @@ pub fn ensure_sequence_id_free(table_dir: &Path, id: u64) -> GenerationResult<()
     let requested = id;
     let id = match u32::try_from(requested) {
         Ok(v) if v <= MAX_SEQUENCE_ID => v,
-        _ => {
-            return Err(GenerationError::SequenceIdOutOfRange { requested })
-        }
+        _ => return Err(GenerationError::SequenceIdOutOfRange { requested }),
     };
     if !table_dir.is_dir() {
         return Ok(());

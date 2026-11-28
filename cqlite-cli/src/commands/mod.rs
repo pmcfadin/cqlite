@@ -18,10 +18,10 @@
 pub mod admin;
 pub mod bench;
 #[cfg(feature = "write-support")]
+pub(crate) mod compact_output;
+#[cfg(feature = "write-support")]
 pub(crate) mod explain_resolve;
 pub mod schema;
-#[cfg(feature = "write-support")]
-pub(crate) mod compact_output;
 #[cfg(feature = "write-support")]
 pub(crate) mod sstable_inputs;
 pub mod write;

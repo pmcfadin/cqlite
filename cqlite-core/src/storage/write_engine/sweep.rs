@@ -341,17 +341,18 @@ mod tests {
     fn sweep_never_deletes_a_complete_generation() {
         // A COMPLETE published generation whose Data.db has a sibling TOC.txt but
         // omits optional components (no Filter.db / no Summary.db) and uses a
-        // high edge generation number — it must survive both sweeps untouched.
+        // high edge generation number (one below the int limit: at the limit the
+        // engine refuses to allocate the next id, G7) — it must survive both sweeps untouched.
         let temp_dir = TempDir::new().unwrap();
         let dir = sstable_dir(&temp_dir);
         std::fs::create_dir_all(&dir).unwrap();
 
         let complete = [
-            "nb-2147483647-big-Data.db",
-            "nb-2147483647-big-Index.db",
-            "nb-2147483647-big-Statistics.db",
-            "nb-2147483647-big-Digest.crc32",
-            "nb-2147483647-big-TOC.txt",
+            "nb-2147483646-big-Data.db",
+            "nb-2147483646-big-Index.db",
+            "nb-2147483646-big-Statistics.db",
+            "nb-2147483646-big-Digest.crc32",
+            "nb-2147483646-big-TOC.txt",
         ];
         for name in &complete {
             std::fs::write(dir.join(name), b"complete").unwrap();
