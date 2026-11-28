@@ -95,7 +95,7 @@ exercises. Commit after each unit (#3042). Each migration PR deletes the copy it
 
 ## 7. Done
 
-- [x] 7.1 A grep proves no discovery or raw Statistics.db read survives outside the module:
+- [ ] 7.1 A grep proves no discovery or raw Statistics.db read survives outside the module:
       `read_dir`-based generation scans, `starts_with("nb-")` filename filters, `Statistics.db` opens, and
       `StatisticsReader` lenient parses, across `cqlite-core/src`, `cqlite-cli/src`, `bindings/` and
       `tools/`. Record the command and its empty output in the final PR.
