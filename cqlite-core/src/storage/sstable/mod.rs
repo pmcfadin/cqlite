@@ -81,7 +81,6 @@ pub use verify::{
 pub mod verify_audit;
 mod verify_location;
 mod verify_order;
-mod verify_resolve;
 
 // M5: SSTable writer components (Issue #359)
 #[cfg(feature = "write-support")]

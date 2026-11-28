@@ -45,7 +45,6 @@ use crate::storage::sstable::reader::SSTableReader;
 use crate::storage::sstable::verify_audit::{self, AuditInputs, AuditSummary};
 use crate::storage::sstable::verify_location::{self, PendingLocation};
 use crate::storage::sstable::verify_order::check_key_order_and_ldt;
-use crate::storage::sstable::verify_resolve;
 use crate::storage::sstable::version_gate::SsTableFormat;
 use crate::{Config, Error, Result};
 use std::path::{Path, PathBuf};
@@ -347,7 +346,11 @@ impl VerifyReport {
     }
 }
 
-pub(crate) use crate::storage::sstable::verify_resolve::ComponentSet;
+// Component resolution lives in a child file (`verify.rs` is over the file-size threshold; wiring it
+// here keeps `sstable/mod.rs`, also over it, from growing).
+#[path = "verify_resolve.rs"]
+mod verify_resolve;
+pub(crate) use verify_resolve::ComponentSet;
 
 /// Verify a single SSTable generation located in `dir`.
 ///
