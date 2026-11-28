@@ -405,12 +405,15 @@ fn below_floor_generation_is_listed_and_refuses_metadata() {
 }
 
 /// G9.1 core-listing: no component of a below-floor generation is opened. Every `ma-1-big-*`
-/// file is mode 000, so any `open` would be an I/O error; the listing must still classify it.
+/// file is a dangling symlink, so any `open` would be an I/O error; the listing must still classify it.
 #[cfg(unix)]
 #[test]
 fn below_floor_listing_opens_no_component() {
-    use std::os::unix::fs::PermissionsExt;
+    // Every component is a DANGLING symlink: opening any of them fails with ENOENT for every
+    // user, root included (mode 000 does not stop root), so an `UnsupportedVersion` result with
+    // no I/O error proves the listing opened none of them.
     let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("missing-target");
     for c in [
         "Data.db",
         "Statistics.db",
@@ -419,11 +422,14 @@ fn below_floor_listing_opens_no_component() {
         "Index.db",
     ] {
         let p = tmp.path().join(format!("ma-1-big-{c}"));
-        std::fs::write(&p, b"x").unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::os::unix::fs::symlink(&missing, &p).unwrap();
+        assert!(
+            std::fs::File::open(&p).is_err(),
+            "a dangling link must not open"
+        );
     }
     let listing = list_generations(tmp.path(), &Scope::Live, TocPolicy::Accept)
-        .expect("listing a mode-000 below-floor generation must not be an I/O error");
+        .expect("listing an unopenable below-floor generation must not be an I/O error");
     assert_eq!(listing.live.len(), 1);
     assert_eq!(
         listing.live[0].conditions(),
