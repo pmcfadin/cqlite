@@ -1,97 +1,64 @@
-//! Input discovery for `cqlite salvage` (issue #4196) — resolving `args.input`
-//! (a single `Data.db` file, or a table directory) into the ordered set of
-//! generations to salvage, and deriving a target table name from an input's
-//! own directory naming. Split out of `salvage.rs` (round 15, campsite rule
-//! / epic #1116) when that file crossed the ~800-line source threshold — a
-//! PURE MOVE, no behavior changed by the split.
+//! Input discovery for `cqlite salvage` (issue #4196, #4626) — resolving `args.input` (a single
+//! `Data.db` file, or a table directory) into the ordered set of generations to salvage, and
+//! deriving a target table name from an input's own directory naming.
+//!
+//! A table directory is listed through the generation module (`list_generations`, Scope Live,
+//! `TocMissing` accepted; GD10): this file keeps no scan of its own. What the module returns that
+//! salvage cannot salvage is a named refusal here, in salvage's own vocabulary.
 
 use std::path::{Path, PathBuf};
 
-/// A `*-Data.db` (with a publishing `*-TOC.txt` sibling) that
-/// [`discover_salvage_inputs`] declined to include because its generation
-/// number could not be parsed — named rather than silently defaulted
-/// (roborev, issue #4196, batched finding h).
+use cqlite_core::storage::sstable::generation::{Condition, Generation};
+
+use crate::commands::generation_listing::{data_path, list_live, print_notes};
+
+/// A `*-Data.db` that [`discover_salvage_inputs`] declined to include — a below-floor generation,
+/// an Orphan, or a name the listing does not recognise as an SSTable component — named with the
+/// reason rather than silently dropped (roborev, issue #4196, batched finding h).
 pub(super) struct SkippedInput {
     pub(super) path: PathBuf,
     pub(super) reason: String,
 }
 
-/// [`discover_salvage_inputs`]'s result: the generations it WILL salvage
-/// (oldest first), separate from the ones it named and skipped.
+/// [`discover_salvage_inputs`]'s result: the generations it WILL salvage (the module's order,
+/// `SSTableIdFactory.COMPARATOR`), separate from the ones it named and skipped.
 pub(super) struct SalvageDiscovery {
     pub(super) generations: Vec<PathBuf>,
     pub(super) skipped: Vec<SkippedInput>,
-    /// Generations named EXPLICITLY as a single-file input that carry no
-    /// sibling `-TOC.txt` publication barrier (roborev, issue #4196, round-22
-    /// Low finding). They ARE salvaged — an explicit file path overrides the
-    /// barrier, see [`discover_salvage_inputs`]'s doc — but the absence is
-    /// recorded so it reaches the manifest instead of vanishing. Always empty
-    /// for a table-directory input, where the same condition is a
-    /// [`SkippedInput`] instead.
+    /// Generations that are salvaged although their `TOC.txt` is missing (`TocMissing`): listed
+    /// from a table directory (GD10) or named explicitly as a single file. They ARE salvaged, but
+    /// the absence is recorded so it reaches the manifest instead of vanishing: without the
+    /// publication barrier salvage cannot know the generation was ever COMPLETELY written.
     pub(super) barrier_absent: Vec<PathBuf>,
 }
 
-/// `args.input` is a single `Data.db` file, or a table directory whose
-/// generations (BIG `nb-*-big-Data.db` AND BTI `da-*-bti-Data.db`, each with
-/// a sibling `TOC.txt` publication barrier) are salvaged separately, oldest
-/// generation first — then, for a TIE, by path — for deterministic output on
-/// every filesystem (roborev, issue #4196, round-22 Low finding).
+/// `args.input` is a single `Data.db` file, or a table directory whose live generations are
+/// salvaged separately, in the generation module's order.
 ///
-/// A file whose generation number cannot be parsed out of its name is NEVER
-/// folded into the sortable set at sort key `0` (roborev, issue #4196,
-/// batched finding h): that risked sorting a malformed entry AHEAD of every
-/// real generation and, since `salvage_sstable` hard-erroring on it used to
-/// abort the WHOLE run (fixed alongside this — see
-/// `exit_after_partial_failure`), a single badly-named file could silently
-/// prevent every sibling generation from ever being attempted. Such an entry
-/// is instead named in [`SalvageDiscovery::skipped`] and excluded from
-/// `generations`; the caller still salvages every OTHER generation.
+/// # A table directory (issue #4626, GD10)
 ///
-/// # The `-TOC.txt` publication barrier: enforced for a DIRECTORY, overridden
-/// for an explicit FILE — and NEVER silently
+/// Listed with Scope Live, which never recurses: an `--out` directory placed inside the input tree
+/// is never rediscovered as an input, and `snapshots/` and `backups/` are never entered.
 ///
-/// Roborev, issue #4196, round-22 Low finding: the single-file branch returned
-/// with no `-TOC.txt` probe at all, while the directory branch names a
-/// barrier-less generation as a [`SkippedInput`] that lands in the manifest and
-/// forces exit 3. So `salvage ./ks/t-<id>/nb-3-big-Data.db` salvaged an
-/// unpublished generation SILENTLY while `salvage ./ks/t-<id>/` on the same file
-/// named it and refused — an asymmetry nothing declared.
+/// * `TocMissing` is accepted: the generation is salvaged and recorded in
+///   [`SalvageDiscovery::barrier_absent`] (an imperfect, exit 3, outcome, as for an explicit file).
+/// * A below-floor generation is refused as `UnsupportedVersion` and never read: named and skipped.
+/// * An Orphan is named and skipped with its condition.
+/// * A `*-Data.db` the listing ignores (not an SSTable component name) is named and skipped.
+/// * A UUID-id generation refuses the WHOLE run by name (salvage requires sequence ids, owner
+///   ruling Q41): proceeding with the sequence generations alone would present a partial table as
+///   a salvage of it.
+/// * An inconsistent or unreadable transaction log refuses the run, naming the log.
 ///
-/// The resolution is deliberate, and it is not "make both refuse": an explicit
-/// file path is an operator's explicit choice, and salvaging an unpublished
-/// (partially flushed, interrupted) generation is a legitimate recovery
-/// scenario this tool should not be able to be talked out of. So the file branch
-/// SALVAGES it — and records the absence in
-/// [`SalvageDiscovery::barrier_absent`], which becomes an
-/// `UnpublishedInputGeneration` component finding in the manifest and, like the
-/// directory branch, an imperfect (exit 3) outcome: without the barrier salvage
-/// cannot know the generation was ever COMPLETELY written, so the run's premise
-/// is unverified and must not read as clean. Same exit code for the same file
-/// whichever way it is named; the difference is that the file form still
-/// recovers the data.
+/// # A single file
 ///
-/// The probe needs the component prefix, so it fires only for a file actually
-/// named `*-Data.db`. Any other name has no derivable `-TOC.txt` sibling to look
-/// for and is left to the reader to reject on its own merits.
+/// An explicit file path is an operator's explicit choice: salvaging an unpublished (partially
+/// flushed, interrupted) generation is a legitimate recovery scenario, so a `TocMissing` file is
+/// SALVAGED and recorded in [`SalvageDiscovery::barrier_absent`], never silently (round-22 Low
+/// finding): same exit code (3) for the same file whichever way it is named.
 pub(super) fn discover_salvage_inputs(input: &Path) -> anyhow::Result<SalvageDiscovery> {
-    use anyhow::Context;
-
     if input.is_file() {
-        let mut barrier_absent = Vec::new();
-        if let Some(base) = input
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_suffix("-Data.db"))
-        {
-            if !input.with_file_name(format!("{base}-TOC.txt")).exists() {
-                barrier_absent.push(input.to_path_buf());
-            }
-        }
-        return Ok(SalvageDiscovery {
-            generations: vec![input.to_path_buf()],
-            skipped: Vec::new(),
-            barrier_absent,
-        });
+        return single_file(input);
     }
     if !input.is_dir() {
         return Err(anyhow::anyhow!(
@@ -99,95 +66,95 @@ pub(super) fn discover_salvage_inputs(input: &Path) -> anyhow::Result<SalvageDis
             input.display()
         ));
     }
+    let listing = list_live(input)?;
+    print_notes("salvage", &listing.notes);
 
-    let mut found: Vec<(u64, PathBuf)> = Vec::new();
-    let mut skipped: Vec<SkippedInput> = Vec::new();
-    for entry in
-        std::fs::read_dir(input).with_context(|| format!("failed to read {}", input.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        let family = if name.ends_with("-big-Data.db") {
-            "-big"
-        } else if name.ends_with("-bti-Data.db") {
-            "-bti"
-        } else {
-            continue;
-        };
-        // roborev, issue #4196, round-11 Low finding: `trim_end_matches`
-        // strips REPEATED trailing occurrences of the pattern — a file
-        // literally named `...-Data.db-Data.db` (or any stem that itself
-        // ends in `-Data.db`) would have BOTH stripped, yielding a `base`
-        // that no longer names the real component prefix, so the `-TOC.txt`
-        // probe below then looks for the wrong sibling. `strip_suffix`
-        // removes the suffix EXACTLY ONCE, which is what `family`'s match
-        // above already established this loop needs.
-        let Some(base) = name.strip_suffix("-Data.db") else {
-            continue;
-        };
-        let toc = path.with_file_name(format!("{base}-TOC.txt"));
-        if !toc.exists() {
-            // roborev, issue #4196 (round-5 Medium): the SAME visibility gap
-            // finding 5 fixed for an unparseable generation number, left
-            // open for a missing publication barrier — a very plausible
-            // damage mode for this tool's own target audience. Named and
-            // skipped via the SAME `SkippedInput` vehicle rather than
-            // silently `continue`d, so it is recorded in the manifest and
-            // forces an imperfect (exit 3) outcome instead of vanishing.
+    let uuid_ids: Vec<String> = listing
+        .live
+        .iter()
+        .filter(|g| g.id().sequence().is_none())
+        .map(Generation::base_name)
+        .collect();
+    if !uuid_ids.is_empty() {
+        return Err(anyhow::anyhow!(
+            "salvage requires a sequential-integer SSTable id, but {} holds UUID-id generation(s):              {} — UUID-form SSTable ids are not yet supported; the run did not proceed with the              other generations",
+            input.display(),
+            uuid_ids.join(", ")
+        ));
+    }
+
+    let mut generations = Vec::new();
+    let mut skipped = Vec::new();
+    let mut barrier_absent = Vec::new();
+    for g in &listing.live {
+        if let Some(below) = g.below_floor() {
             skipped.push(SkippedInput {
-                path,
-                reason: format!("no sibling {base}-TOC.txt (unpublished generation)"),
+                path: data_path(g),
+                reason: format!(
+                    "{}: UnsupportedVersion ({} is below the supported floor {}); salvage does not \
+                     read it",
+                    g.base_name(),
+                    below.version,
+                    below.floor
+                ),
             });
             continue;
         }
-        match base
-            .strip_suffix(family)
-            .and_then(|s| s.rsplit_once('-'))
-            .and_then(|(_, g)| g.parse::<u64>().ok())
-        {
-            Some(generation) => found.push((generation, path)),
-            None => skipped.push(SkippedInput {
-                path,
-                reason: format!("'{name}' does not end in <family>-<integer>-Data.db"),
-            }),
+        if g.has_condition(Condition::TocMissing) {
+            barrier_absent.push(data_path(g));
+        }
+        generations.push(data_path(g));
+    }
+    for g in &listing.orphans {
+        skipped.push(SkippedInput {
+            path: data_path(g),
+            reason: format!(
+                "{}: Orphan (Data.db missing or zero-length); not salvaged",
+                g.base_name()
+            ),
+        });
+    }
+    for path in &listing.ignored {
+        let named = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        if path.is_file() && named.ends_with("-Data.db") {
+            skipped.push(SkippedInput {
+                path: path.clone(),
+                reason: format!("'{named}' is not an SSTable component name (the listing ignores it)"),
+            });
         }
     }
-    sort_generations(&mut found);
     Ok(SalvageDiscovery {
-        generations: found.into_iter().map(|(_, p)| p).collect(),
+        generations,
         skipped,
-        // A directory input enforces the barrier (a barrier-less generation is
-        // a `SkippedInput` above), so there is never an overridden one here.
-        barrier_absent: Vec::new(),
+        barrier_absent,
     })
 }
 
-/// Order the discovered generations TOTALLY: generation number ascending, then
-/// PATH ascending as a tiebreak.
-///
-/// Roborev, issue #4196, round-22 Low finding: this was
-/// `found.sort_by_key(|(g, _)| *g)` — the generation ALONE. `sort_by_key` is
-/// STABLE, so tied generations kept `read_dir` order, which is filesystem- and
-/// platform-dependent. A mixed-format mid-migration table dir holding both
-/// `nb-1-big-Data.db` and `da-1-bti-Data.db` (the exact case
-/// [`discover_salvage_inputs`]'s loop scans BOTH families for) therefore
-/// salvaged in a non-reproducible order, contradicting that function's own
-/// "oldest generation first for deterministic output" contract — and with it the
-/// D5 manifest ARRAY's entry order, which is a machine-readable output.
-///
-/// Factored out as its own function specifically so the property can be tested
-/// as ORDER-INVARIANCE (`sort_generations` produces the same result from any
-/// input permutation) rather than through `read_dir`: the end-to-end version of
-/// this test PASSES on macOS/APFS even with the tie-blind sort restored, because
-/// that filesystem happened to enumerate the entries in the expected order — a
-/// test that cannot fail on the machine running it proves nothing.
-fn sort_generations(found: &mut [(u64, PathBuf)]) {
-    found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+/// The single-file input: salvaged as named; `TocMissing` is read from the module's listing of its
+/// directory, not from a probe of its own.
+fn single_file(input: &Path) -> anyhow::Result<SalvageDiscovery> {
+    let mut barrier_absent = Vec::new();
+    let parent = match input.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let listing = list_live(parent)?;
+    if let Some(named) = input.file_name().and_then(|n| n.to_str()) {
+        let is_this = |g: &&Generation| format!("{}-Data.db", g.base_name()) == named;
+        if listing
+            .live
+            .iter()
+            .find(is_this)
+            .is_some_and(|g| g.has_condition(Condition::TocMissing))
+        {
+            barrier_absent.push(input.to_path_buf());
+        }
+    }
+    Ok(SalvageDiscovery {
+        generations: vec![input.to_path_buf()],
+        skipped: Vec::new(),
+        barrier_absent,
+    })
 }
 
 /// Derive the target table's DIRECTORY NAME from `input` — either `input`
@@ -277,9 +244,7 @@ fn is_table_id_suffix(id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        discover_salvage_inputs, is_table_id_dir, sort_generations, table_name_from_input,
-    };
+    use super::{discover_salvage_inputs, is_table_id_dir, table_name_from_input};
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
@@ -295,8 +260,7 @@ mod tests {
     /// Roborev, issue #4196, round-22 Low finding — an EXPLICITLY-named
     /// `Data.db` with no sibling `-TOC.txt` is still salvaged (the operator
     /// named it), but the missing publication barrier is RECORDED, never
-    /// silent. The directory branch's own behavior for the same file (a named
-    /// `SkippedInput`) is pinned by `salvage_cli_tests`.
+    /// silent.
     #[test]
     fn explicit_file_without_toc_txt_is_salvaged_but_the_barrier_absence_is_recorded() {
         let temp = TempDir::new().expect("tempdir");
@@ -304,11 +268,7 @@ mod tests {
         std::fs::write(&data_db, b"data").expect("write Data.db");
 
         let discovery = discover_salvage_inputs(&data_db).expect("discovery must succeed");
-        assert_eq!(
-            discovery.generations,
-            vec![data_db.clone()],
-            "an explicit file path must still be salvaged — the barrier is overridden, not enforced"
-        );
+        assert_eq!(discovery.generations, vec![data_db.clone()]);
         assert_eq!(
             discovery.barrier_absent,
             vec![data_db],
@@ -317,8 +277,7 @@ mod tests {
         assert!(discovery.skipped.is_empty());
     }
 
-    /// The barrier PRESENT: nothing recorded. Without this the case above could
-    /// pass while recording the absence unconditionally.
+    /// The barrier PRESENT: nothing recorded.
     #[test]
     fn explicit_file_with_toc_txt_records_no_barrier_finding() {
         let temp = TempDir::new().expect("tempdir");
@@ -327,16 +286,11 @@ mod tests {
 
         let discovery = discover_salvage_inputs(&data_db).expect("discovery must succeed");
         assert_eq!(discovery.generations, vec![data_db]);
-        assert!(
-            discovery.barrier_absent.is_empty(),
-            "a published generation has nothing to record; got {:?}",
-            discovery.barrier_absent
-        );
+        assert!(discovery.barrier_absent.is_empty());
     }
 
-    /// A file NOT named `*-Data.db` has no derivable `-TOC.txt` sibling to probe
-    /// for, so nothing is recorded (the reader rejects it on its own merits) —
-    /// the probe must not invent a component prefix.
+    /// A file NOT named like an SSTable component has no generation to look up, so nothing is
+    /// recorded (the reader rejects it on its own merits).
     #[test]
     fn explicit_file_not_named_data_db_records_no_barrier_finding() {
         let temp = TempDir::new().expect("tempdir");
@@ -348,76 +302,30 @@ mod tests {
         assert!(discovery.barrier_absent.is_empty());
     }
 
-    /// A table-DIRECTORY input never overrides the barrier: the same
-    /// barrier-less generation is a named `SkippedInput` and
-    /// `barrier_absent` stays empty.
+    /// GD10: a table-DIRECTORY input ACCEPTS `TocMissing` — the generation is salvaged and the
+    /// absence recorded — and names an Orphan without salvaging it.
     #[test]
-    fn directory_input_enforces_the_barrier_and_records_no_override() {
+    fn directory_input_accepts_toc_missing_and_skips_an_orphan_by_name() {
         let temp = TempDir::new().expect("tempdir");
         published(temp.path(), "nb-1-big");
         std::fs::write(temp.path().join("nb-2-big-Data.db"), b"data").expect("write unpublished");
+        std::fs::write(temp.path().join("nb-3-big-Data.db"), b"").expect("write orphan");
 
         let discovery = discover_salvage_inputs(temp.path()).expect("discovery must succeed");
-        assert_eq!(discovery.generations.len(), 1, "only nb-1 is published");
+        assert_eq!(discovery.generations.len(), 2, "nb-1 and the TocMissing nb-2");
+        assert_eq!(discovery.barrier_absent.len(), 1);
+        assert!(discovery.barrier_absent[0].ends_with("nb-2-big-Data.db"));
         assert_eq!(discovery.skipped.len(), 1);
-        assert!(discovery.skipped[0]
-            .path
-            .to_string_lossy()
-            .ends_with("nb-2-big-Data.db"));
-        assert!(
-            discovery.barrier_absent.is_empty(),
-            "a directory input ENFORCES the barrier; the override is the file form only"
-        );
+        assert!(discovery.skipped[0].path.ends_with("nb-3-big-Data.db"));
+        assert!(discovery.skipped[0].reason.contains("Orphan"));
     }
 
-    /// Roborev, issue #4196, round-22 Low finding — TIED generation numbers
-    /// must order DETERMINISTICALLY, and the order must not depend on the order
-    /// the entries were DISCOVERED in.
-    ///
-    /// This is the case that actually FAILS under the old
-    /// `sort_by_key(|(g, _)| *g)`: that sort is STABLE, so it returns tied
-    /// entries in input order — i.e. a DIFFERENT answer per permutation, which
-    /// in `discover_salvage_inputs` is whatever `read_dir` yields on the
-    /// operator's filesystem. Asserted as ORDER-INVARIANCE over every
-    /// permutation of a tied pair, so it cannot pass by luck.
-    ///
-    /// The end-to-end sibling test below (through a real `read_dir`) is
-    /// deliberately NOT the primary pin: it passes on macOS/APFS even with the
-    /// defect restored, because that filesystem happened to enumerate the
-    /// entries in the expected order — measured, not assumed.
+    /// The listing's order is the comparator's (numeric, never lexicographic), whatever order the
+    /// entries were created in, with a tie between formats broken by name.
     #[test]
-    fn tied_generations_sort_identically_from_every_input_permutation() {
-        let nb = PathBuf::from("/data/t/nb-1-big-Data.db");
-        let da = PathBuf::from("/data/t/da-1-bti-Data.db");
-        // `da-…` < `nb-…` lexicographically, so path order is the tiebreak.
-        let expected = vec![(1u64, da.clone()), (1u64, nb.clone())];
-        for input in [
-            vec![(1u64, nb.clone()), (1u64, da.clone())],
-            vec![(1u64, da.clone()), (1u64, nb.clone())],
-        ] {
-            let mut found = input.clone();
-            sort_generations(&mut found);
-            assert_eq!(
-                found, expected,
-                "tied generations must sort to ONE canonical order whatever order they were \
-                 discovered in (input was {input:?}) — a stable sort on the generation alone \
-                 returns them in discovery order, which is `read_dir`'s, which is the \
-                 filesystem's"
-            );
-        }
-    }
-
-    /// The same ordering end to end, through a real `read_dir`, and covering the
-    /// NUMERIC half (generation 2 before 10, never lexicographic). The FULL
-    /// ordering is asserted, not just the first element.
-    ///
-    /// Weaker than its sibling above by construction — see that test's doc.
-    #[test]
-    fn tied_generations_order_by_path_and_the_full_order_is_deterministic() {
+    fn generations_come_back_in_the_modules_order() {
         let temp = TempDir::new().expect("tempdir");
         let dir = temp.path();
-        // Written in an order that is neither the expected output order nor its
-        // reverse, so a pass cannot be an artifact of insertion order.
         published(dir, "nb-2-big");
         published(dir, "nb-1-big");
         published(dir, "da-1-bti");
@@ -427,34 +335,45 @@ mod tests {
         let names: Vec<String> = discovery
             .generations
             .iter()
-            .map(|p| {
-                p.file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string()
-            })
+            .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
             .collect();
         assert_eq!(
             names,
             vec![
-                // generation 1, tie broken by path: `da-` sorts before `nb-`
-                "da-1-bti-Data.db".to_string(),
-                "nb-1-big-Data.db".to_string(),
-                // then 2, then 10 — NUMERIC, never lexicographic ("10" < "2")
-                "nb-2-big-Data.db".to_string(),
-                "da-10-bti-Data.db".to_string(),
-            ],
-            "generations must be ordered by generation number, then by path"
+                "da-1-bti-Data.db",
+                "nb-1-big-Data.db",
+                "nb-2-big-Data.db",
+                "da-10-bti-Data.db",
+            ]
         );
-        assert!(
-            discovery.skipped.is_empty(),
-            "every staged generation is published and well-named; got {:?}",
-            discovery
-                .skipped
-                .iter()
-                .map(|s| s.path.display().to_string())
-                .collect::<Vec<_>>()
-        );
+        assert!(discovery.skipped.is_empty());
+    }
+
+    /// GD10: a below-floor generation is skipped by name as `UnsupportedVersion`, never salvaged.
+    #[test]
+    fn a_below_floor_generation_is_skipped_as_unsupported_version() {
+        let temp = TempDir::new().expect("tempdir");
+        published(temp.path(), "ma-1-big");
+        published(temp.path(), "nb-1-big");
+        let discovery = discover_salvage_inputs(temp.path()).expect("discovery must succeed");
+        assert_eq!(discovery.generations.len(), 1);
+        assert!(discovery.generations[0].ends_with("nb-1-big-Data.db"));
+        assert_eq!(discovery.skipped.len(), 1);
+        assert!(discovery.skipped[0].reason.contains("UnsupportedVersion"));
+    }
+
+    /// GD10.3: a UUID-id generation refuses the whole discovery, naming it.
+    #[test]
+    fn a_uuid_id_generation_refuses_discovery_by_name() {
+        let temp = TempDir::new().expect("tempdir");
+        published(temp.path(), "nb-1-big");
+        published(temp.path(), "nb-3h5t_0i6r_2dipm2lxu6305iz8wl-big");
+        let err = discover_salvage_inputs(temp.path())
+            .err()
+            .expect("a UUID-id generation must refuse")
+            .to_string();
+        assert!(err.contains("nb-3h5t_0i6r_2dipm2lxu6305iz8wl-big"), "{err}");
+        assert!(err.contains("UUID"), "{err}");
     }
 
     /// A syntactically valid Cassandra table id: exactly 32 lowercase hex chars.

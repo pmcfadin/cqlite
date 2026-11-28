@@ -282,8 +282,8 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
     if generations.is_empty() {
         if discovery.skipped.is_empty() {
             eprintln!(
-                "cqlite salvage: no published *-Data.db found under {} (a Data.db needs a \
-                 sibling TOC.txt)",
+                "cqlite salvage: no live *-Data.db found under {} (the generation listing \
+                 returned nothing to salvage)",
                 args.input.display()
             );
         } else {
