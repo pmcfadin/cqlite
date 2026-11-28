@@ -28,7 +28,7 @@ Issue `#N`, worktree `.claude/worktrees/issue-<N>-<slug>`, branch `issue-<N>-<sl
 5. **`scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-summary>`** then re-read for `HOLD:`.
 6. **Arm** `gh pr merge <pr> --auto --squash --delete-branch`.
 7. **Finalize** — `flow-finalize <N>` (archives the OpenSpec change if any, removes the worktree and claim
-   branch, clears the heartbeat, closes the issue with a traceable comment).
+   branch, deletes the lane's `wt/<hash>` gate build dir via `scripts/flow/lane-builddir.sh` (#4641), clears the heartbeat, closes the issue with a traceable comment).
 
 Why this order: a roborev round changes no bytes, so reviewing after gating is free; a rebase changes
 bytes, so a later rebase voids the gate **and** the roborev round (#3752). Any src change after the gate
