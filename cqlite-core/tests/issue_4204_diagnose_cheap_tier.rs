@@ -296,7 +296,8 @@ fn copy_dir_with_empty_data_db(src: &Path) -> tempfile::TempDir {
         }
         let dest = tmp.path().join(&name);
         if name.ends_with("-Data.db") {
-            std::fs::write(&dest, b"").expect("empty Data.db");
+            // Placeholder content, not zero-length: an empty Data.db is an Orphan (G4, #4626).
+            std::fs::write(&dest, b"x").expect("placeholder Data.db");
         } else {
             std::fs::copy(&p, &dest).expect("copy component");
         }

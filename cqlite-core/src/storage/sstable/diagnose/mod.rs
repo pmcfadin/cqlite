@@ -141,7 +141,7 @@ impl<T> SourcedField<T> {
 #[derive(Debug, Clone)]
 pub struct GenerationDiagnosis {
     /// The real on-disk sstable id: Cassandra's sequential integer (`"12"`) or a UUID-based id
-    /// (`"3gkx_1f1t_2z5ah8vjn8sd9d8sjh"`), exactly as it appears in the file name.
+    /// (`"3h5t_0i6r_2dipm2lxu6305iz8wl"`), exactly as it appears in the file name.
     pub generation: String,
     /// Two-letter on-disk format version, e.g. `"nb"`, `"oa"`, `"da"`.
     pub format: String,

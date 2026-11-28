@@ -427,7 +427,9 @@ fn cheap_tier_through_the_binary_never_needs_data_db() {
     let hollow = copy_dir(&src);
     for e in std::fs::read_dir(hollow.path()).expect("dir").flatten() {
         if e.file_name().to_string_lossy().ends_with("-Data.db") {
-            std::fs::write(e.path(), b"").expect("empty");
+            // One placeholder byte, not zero: a zero-length Data.db is an Orphan (G4), and this test is
+            // about the cheap tier never needing Data.db CONTENT.
+            std::fs::write(e.path(), b"x").expect("placeholder");
         }
     }
     let h = run_json(hollow.path(), &[]);

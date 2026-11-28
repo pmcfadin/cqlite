@@ -70,7 +70,8 @@ fn copy_generation_as(src: &Path, dst: &Path, new_id: &str, skip_suffix: Option<
         );
         let dest = dst.join(format!("{v}-{new_id}-{f}-{c}"));
         if c == "Data.db" {
-            std::fs::write(dest, b"").expect("empty");
+            // Placeholder content, not zero-length: an empty Data.db is an Orphan (G4, #4626).
+            std::fs::write(dest, b"x").expect("placeholder");
         } else {
             std::fs::copy(e.path(), dest).expect("copy");
         }
@@ -86,8 +87,11 @@ async fn uuid_based_sstable_ids_are_reported_verbatim_and_distinct() {
     };
     let tmp = tempfile::tempdir().expect("tempdir");
     let ids = [
-        "3gkx_1f1t_2z5ah8vjn8sd9d8sjh",
-        "3gkx_1f1u_0abcdefghijklmnopq",
+        // Ids Cassandra 5.0.8 wrote (`test-data/fixtures/issue_4626/uuid_ids`): the generation
+        // module parses the real `UUIDBasedSSTableId` rules, which refuse an invented 13-char
+        // random group that overflows 64 bits.
+        "3h5t_0i6r_2dipm2lxu6305iz8wl",
+        "3h5t_0i6s_1tsu22lxu6305iz8wl",
         "7",
     ];
     for id in ids {
