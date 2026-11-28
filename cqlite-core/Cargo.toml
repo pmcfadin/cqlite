@@ -80,6 +80,7 @@ exclude = [
     "tests/generation_discovery.rs",
     "tests/generation_txn.rs",
     "tests/issue_4626_write_engine_ids.rs",
+    "tests/issue_4626_forensics_core.rs",
 ]
 
 # docs.rs build: document the commonly used features.
@@ -290,6 +291,12 @@ required-features = ["write-support"]
 [[test]]
 name = "issue_4626_write_engine_ids"
 path = "tests/issue_4626_write_engine_ids.rs"
+required-features = ["write-support"]
+
+# Issue #4626 phase 3: diagnose and the directory scan over Cassandra-written generation fixtures.
+[[test]]
+name = "issue_4626_forensics_core"
+path = "tests/issue_4626_forensics_core.rs"
 required-features = ["write-support"]
 
 # Issue #4628: SELECT vs live CL=ALL over the cross-generation tombstone fixture.

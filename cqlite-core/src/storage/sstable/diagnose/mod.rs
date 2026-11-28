@@ -422,18 +422,35 @@ async fn diagnose_generation(
     config: &Config,
     platform: Arc<Platform>,
     read: &dyn Fn(&Path) -> Result<Vec<u8>>,
-) -> Result<(GenerationDiagnosis, Option<(i64, i64)>)> {
+) -> std::result::Result<(GenerationDiagnosis, Option<(i64, i64)>), String> {
     // GD8, GD9: the floor, the bounded read, the strict integrity check (#4612) and the one parse
     // are the generation's trusted-metadata accessor. A failure becomes this generation's
     // `unreadable_generations` entry (R6) with the condition named in the cause.
-    let stats = generation.trusted_metadata_via(read).map_err(|failure| {
-        Error::corruption(format!("{:?}: {failure}", failure.condition()))
-    })?;
-    let stats_bytes = generation
-        .trusted_statistics_bytes()
-        .map_err(|failure| Error::corruption(format!("{:?}: {failure}", failure.condition())))?;
+    let named = |failure: crate::storage::sstable::generation::MetadataFailure| {
+        format!("{:?}: {failure}", failure.condition())
+    };
+    let stats = generation.trusted_metadata_via(read).map_err(named)?;
+    let stats_bytes = generation.trusted_statistics_bytes().map_err(named)?;
+    diagnose_loaded_generation(
+        generation, data_path, options, gc_before, config, platform, &stats, &stats_bytes,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// The rest of [`diagnose_generation`], once the trusted metadata is in hand.
+#[allow(clippy::too_many_arguments)]
+async fn diagnose_loaded_generation(
+    generation: &Generation,
+    data_path: &Path,
+    options: &DiagnoseOptions,
+    gc_before: Option<i64>,
+    config: &Config,
+    platform: Arc<Platform>,
+    stats: &SSTableStatistics,
+    stats_bytes: &[u8],
+) -> Result<(GenerationDiagnosis, Option<(i64, i64)>)> {
     let gates = generation.version_gates();
-    let stats_bytes: &[u8] = &stats_bytes;
 
     let repair = parse_repair_metadata(stats_bytes, gates.as_ref())?;
     let cell_per_partition = read_cell_per_partition_stats(stats_bytes)?;
@@ -463,12 +480,12 @@ async fn diagnose_generation(
         read_stats_minimums(stats_bytes, gates.as_ref())?.ok_or_else(|| {
             Error::corruption("Statistics.db carries no STATS component".to_string())
         })?;
-    let max_timestamp = max_timestamp_field(&stats);
-    let estimated_partition_count = estimated_partition_count_field(&stats);
+    let max_timestamp = max_timestamp_field(stats);
+    let estimated_partition_count = estimated_partition_count_field(stats);
 
     let (estimated_droppable_tombstone_ratio, gc_before_for_ratio) =
         droppable_tombstone_ratio_field(
-            &stats,
+            stats,
             cell_per_partition.as_ref(),
             gc_before,
             options.now_secs,
