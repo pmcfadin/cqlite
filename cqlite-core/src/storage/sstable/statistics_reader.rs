@@ -19,7 +19,7 @@ pub struct StatisticsReader {
     /// Path to the Statistics.db file
     pub(crate) file_path: PathBuf,
     /// Parsed statistics data
-    pub(crate) statistics: SSTableStatistics,
+    pub(crate) statistics: Arc<SSTableStatistics>,
     /// Platform abstraction for file operations
     #[allow(dead_code)]
     pub(crate) platform: Arc<Platform>,
@@ -89,7 +89,7 @@ impl StatisticsReader {
 
         Ok(Self {
             file_path: path.to_path_buf(),
-            statistics,
+            statistics: Arc::new(statistics),
             platform,
         })
     }
@@ -495,7 +495,7 @@ impl StatisticsReader {
             std::sync::Arc::new(crate::Platform::new(&config).await.expect("test platform"));
         Self {
             file_path: PathBuf::from("in-memory-test-Statistics.db"),
-            statistics,
+            statistics: Arc::new(statistics),
             platform,
         }
     }

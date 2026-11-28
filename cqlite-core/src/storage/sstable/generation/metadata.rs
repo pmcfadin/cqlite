@@ -136,6 +136,48 @@ impl MetadataFailure {
     }
 }
 
+/// The trusted values of one `Statistics.db` read by path, for a `Data.db` the listing does not
+/// return (hidden by a transaction log, a refused listing, a name that is not an SSTable
+/// component). The same order as [`Generation::trusted_metadata`]: the floor from the file name,
+/// then the bounded read, the strict integrity check and one parse. Gates come from the name when
+/// it has a descriptor, else the parser's nb-compatible default (as `StatisticsReader::open`).
+#[derive(Debug, Clone)]
+pub(crate) struct DirectStatistics {
+    pub(crate) stats: Arc<SSTableStatistics>,
+    pub(crate) repair: std::result::Result<Arc<RepairMetadata>, String>,
+    pub(crate) extras: std::result::Result<Arc<StatsExtras>, String>,
+}
+
+pub(crate) fn read_direct(path: &Path) -> std::result::Result<DirectStatistics, MetadataFailure> {
+    let gates = match VersionGates::from_path(path) {
+        Ok(g) => Some(g),
+        Err(Error::UnsupportedVersion { version, .. }) => {
+            let bti = path.to_string_lossy().contains("-bti-");
+            return Err(MetadataFailure::UnsupportedVersion {
+                version,
+                floor: if bti { "da" } else { "na" },
+            });
+        }
+        Err(_) => None,
+    };
+    let bytes = read_checked(path).map_err(|e| classify_read_error(path, e))?;
+    let corrupt = |e: Error| MetadataFailure::Corrupt {
+        path: path.to_path_buf(),
+        detail: e.to_string(),
+    };
+    let (_, stats) =
+        parse_statistics_with_fallback_detailed(&bytes, gates.as_ref()).map_err(corrupt)?;
+    Ok(DirectStatistics {
+        stats: Arc::new(stats),
+        repair: parse_repair_metadata(&bytes, gates.as_ref())
+            .map(Arc::new)
+            .map_err(|e| e.to_string()),
+        extras: parse_stats_extras(&bytes, gates.as_ref())
+            .map(Arc::new)
+            .map_err(|e| e.to_string()),
+    })
+}
+
 /// The production read: bounded, then the strict integrity check.
 pub(super) fn read_checked(path: &Path) -> Result<Vec<u8>> {
     integrity::read_checked_statistics(path)

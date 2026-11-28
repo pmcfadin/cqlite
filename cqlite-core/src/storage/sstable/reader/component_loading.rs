@@ -276,7 +276,7 @@ impl SSTableReader {
         if let Some(statistics) = trusted {
             return Ok(Some(StatisticsReader {
                 file_path: statistics_path,
-                statistics: (*statistics).clone(),
+                statistics,
                 platform: platform.clone(),
             }));
         }

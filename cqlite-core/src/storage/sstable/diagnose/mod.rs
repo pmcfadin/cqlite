@@ -522,13 +522,9 @@ async fn diagnose_loaded_generation(
         // cheap-vs-deep split where that is allowed (spec R3/R5.1).
         // The reader takes the generation's already-trusted statistics: no second read of
         // `Statistics.db` (G11, GD9.1).
-        let reader = SSTableReader::open_with_trusted_statistics(
-            data_path,
-            config,
-            platform.clone(),
-            stats.clone(),
-        )
-        .await?;
+        let reader =
+            SSTableReader::open_with_trusted_statistics(generation, config, platform.clone())
+                .await?;
         let scan = deep_scan::deep_scan_generation(&reader, options.schema.as_ref(), options.top_n)
             .await?;
         Some(DeepGenerationReport {

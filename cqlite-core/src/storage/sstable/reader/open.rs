@@ -111,16 +111,23 @@ impl SSTableReader {
         .await
     }
 
-    /// [`open`](Self::open) with the generation's already-trusted `Statistics.db` supplied, so the
-    /// open does not read the file a second time (G11, GD9.1: one read per generation per run).
-    /// `statistics` must come from the generation module's accessor for this same `Data.db`.
+    /// [`open`](Self::open) over a listed generation's `Data.db`, handing the reader the
+    /// generation's already-trusted `Statistics.db` so the open does not read the file a second
+    /// time (G11, GD9.1: one read per generation per run).
     #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
     pub(crate) async fn open_with_trusted_statistics(
-        path: &Path,
+        generation: &crate::storage::sstable::generation::Generation,
         config: &Config,
         platform: Arc<Platform>,
-        statistics: Arc<crate::parser::statistics::SSTableStatistics>,
     ) -> Result<Self> {
+        // The path and the statistics both come from the generation, so they cannot be paired
+        // wrongly; `trusted_metadata` is the generation's cached read (or fails by name).
+        let path = generation.component_path("Data.db").ok_or_else(|| {
+            crate::Error::not_found(format!("{} has no Data.db", generation.base_name()))
+        })?;
+        let statistics = generation
+            .trusted_metadata()
+            .map_err(|e| crate::Error::corruption(e.to_string()))?;
         let cache = super::super::build_chunk_cache(config);
         Self::open_instrumented(
             path,

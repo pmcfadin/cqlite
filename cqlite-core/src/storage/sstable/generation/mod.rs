@@ -35,6 +35,7 @@ pub use listing::list_generations;
 pub use metadata::MetadataFailure;
 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub use metadata::StatisticsFacts;
+pub(crate) use metadata::{read_direct, DirectStatistics};
 pub use model::{
     Component, Condition, DirectoryNote, Generation, HiddenBy, HiddenFile, Listing, Scope,
     TocPolicy,
