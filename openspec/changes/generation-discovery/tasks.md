@@ -60,13 +60,13 @@ exercises. Commit after each unit (#3042). Each migration PR deletes the copy it
 
 ## 3. explain, find, diagnose, diff (PR 3)
 
-- [ ] 3.1 `explain_resolve::discover_live_generations` becomes a call to the module (Live, TocMissing
+- [x] 3.1 `explain_resolve::discover_live_generations` becomes a call to the module (Live, TocMissing
       accepted); `cli-explain` GD5. Surface: `cqlite explain`.
-- [ ] 3.2 `find.rs` (`:322`) lists through the module; `find-key-probe` GD7. Surface: `cqlite find`.
-- [ ] 3.3 `diagnose` and `core-diagnose` use the listing and the accessor; GD8, GD9. Surface: `cqlite
+- [x] 3.2 `find.rs` (`:322`) lists through the module; `find-key-probe` GD7. Surface: `cqlite find`.
+- [x] 3.3 `diagnose` and `core-diagnose` use the listing and the accessor; GD8, GD9. Surface: `cqlite
       diagnose --out json`.
-- [ ] 3.4 `diff` resolves both sides through the module; GD6. Surface: `cqlite diff`.
-- [ ] 3.5 Delete `parse_sstable_filename`'s UUID-skip path in `sstable/directory/scan.rs:128-155` or route it
+- [x] 3.4 `diff` resolves both sides through the module; GD6. Surface: `cqlite diff`.
+- [x] 3.5 Delete `parse_sstable_filename`'s UUID-skip path in `sstable/directory/scan.rs:128-155` or route it
       to the module if the directory reader still needs it. Surface: `SSTableDirectory` scan over a UUID
       corpus.
 - [ ] 3.6 Phase closing tasks.

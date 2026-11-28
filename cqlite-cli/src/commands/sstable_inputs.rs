@@ -8,7 +8,7 @@
 //! What `compact` handles today is exactly what its old `nb-<digits>-big-Data.db` filter
 //! accepted: BIG, version `nb`, sequence id. Everything else the old scanner dropped silently
 //! (`oa`, BTI `da`, UUID ids, a generation without `TOC.txt`) is now a named refusal.
-//! `explain` deliberately does NOT use this (see `explain_resolve.rs`).
+//! `explain` accepts `TocMissing` and has its own refusals (see `explain_resolve.rs`).
 
 use anyhow::{bail, Result};
 use cqlite_core::storage::sstable::generation::{

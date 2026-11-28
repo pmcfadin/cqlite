@@ -1,48 +1,59 @@
-//! Keyspace-qualified table-directory resolution and live-generation discovery for
-//! `cqlite explain` (#4193), split out of `explain.rs` for the file-size ratchet.
+//! Keyspace-qualified table-directory resolution and live-generation resolution for
+//! `cqlite explain` (#4193) and `cqlite diff` (#4201), split out of `explain.rs` for the
+//! file-size ratchet.
 //!
-//! Live generations follow Cassandra's `Directories.SSTableLister`
-//! (`git show cassandra-5.0.8:src/java/org/apache/cassandra/db/Directories.java`): live sstables
-//! are the files directly in the table directory (`LifecycleTransaction.getFiles(location, ..)`
-//! is a flat listing). `<cf dir>/snapshots/<tag>/` (`SNAPSHOT_SUBDIR`), `<cf dir>/backups/`
-//! (`BACKUPS_SUBDIR`, only listed with `includeBackups`) and secondary-index subdirectories
-//! (`.<index>`, `isSecondaryIndexFolder`) are never part of the live set, so they are never read.
+//! Which generations are live is the generation module's answer (issue #4626, GD5/GD6): Scope
+//! Live over ONE directory, with a committed transaction hiding its obsolete inputs and an
+//! uncommitted one its unfinished outputs, a `TocMissing` generation accepted and shown. The module
+//! follows Cassandra's `Directories.SSTableLister`
+//! (`git show cassandra-5.0.8:src/java/org/apache/cassandra/db/Directories.java`): `<cf dir>/snapshots/<tag>/`,
+//! `<cf dir>/backups/` and secondary-index subdirectories (`.<index>`) are never part of the live
+//! set, so they are never read.
 
 use std::path::{Path, PathBuf};
+
+use super::generation_listing::{data_path, display_name, list_live, metadata_refusal};
 
 /// Directory names that never hold live generations of the enclosing table.
 fn is_non_live_subdir(name: &str) -> bool {
     name == "snapshots" || name == "backups" || name.starts_with('.')
 }
 
-/// The `*-Data.db` of every published live generation directly inside `dir`, newest first.
-///
-/// A generation is `<version>-<generation>-<format>-Data.db` with a sibling `-TOC.txt` (the
-/// publication barrier). Order is generation descending (non-numeric ids sort as 0), then file
-/// name descending, so equal-generation ties are deterministic regardless of `read_dir` order.
-pub(crate) fn discover_live_generations(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut found: Vec<(u64, String, PathBuf)> = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let mut parts = name.splitn(4, '-');
-        let (Some(version), Some(generation), Some(format), Some("Data.db")) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
-            continue;
-        };
-        let toc = dir.join(format!("{version}-{generation}-{format}-TOC.txt"));
-        if !toc.is_file() {
-            continue;
-        }
-        let order = generation.parse::<u64>().unwrap_or(0);
-        found.push((order, name.clone(), entry.path()));
+/// The live generations of one table directory, ready for a verb to use.
+pub(crate) struct ResolvedGenerations {
+    /// `*-Data.db` of every live generation, newest first (the order the merge expects: run
+    /// index 0 is the newest).
+    pub input_paths: Vec<PathBuf>,
+    /// Every live generation in the module's id order (sequence ids first, then UUID ids), as the
+    /// first line shows it: `nb-1-big`, or `nb-1-big (toc-missing)`.
+    pub listed_names: Vec<String>,
+    /// Facts the listing carries that are not generations (orphans, directory notes), for stderr.
+    pub listing: cqlite_core::storage::sstable::generation::Listing,
+}
+
+/// Resolve `dir` through the generation module. `Err` is a read failure (exit 2) naming the
+/// path: an unlistable or inconsistent directory, a below-floor generation, or one whose
+/// `Statistics.db` cannot be trusted (R8). An empty live set is `Ok` with empty paths; the caller
+/// states that in its own words.
+pub(crate) fn resolve_generations(dir: &Path) -> Result<ResolvedGenerations, String> {
+    let listing = list_live(dir).map_err(|error| error.to_string())?;
+    let refusals: Vec<String> = listing.live.iter().filter_map(metadata_refusal).collect();
+    if !refusals.is_empty() {
+        return Err(format!(
+            "generation(s) in {} cannot be read: {}",
+            dir.display(),
+            refusals.join("; ")
+        ));
     }
-    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-    Ok(found.into_iter().map(|(_, _, path)| path).collect())
+    Ok(ResolvedGenerations {
+        // The comparator's order, newest first: `SSTableIdFactory.COMPARATOR` puts every UUID id
+        // after every sequence id, so a UUID generation is the "newest". The merge depends on this
+        // order only as the tie-break: run index 0 wins an exact-timestamp tie, so the order
+        // matters for ties and for nothing else.
+        input_paths: listing.live.iter().rev().map(data_path).collect(),
+        listed_names: listing.live.iter().map(display_name).collect(),
+        listing,
+    })
 }
 
 fn dir_name_matches_table(name: &str, table_name: &str) -> bool {
@@ -53,10 +64,36 @@ fn dir_name_matches_table(name: &str, table_name: &str) -> bool {
             .unwrap_or(false)
 }
 
+/// Whether `dir` holds a live generation. A directory whose transaction state is inconsistent
+/// still counts: it is a table directory, and the verb that lists it refuses it by name (exit 2).
 fn has_live_generations(dir: &Path) -> Result<bool, String> {
-    discover_live_generations(dir)
-        .map(|generations| !generations.is_empty())
-        .map_err(|error| format!("could not inspect {}: {error}", dir.display()))
+    use cqlite_core::storage::sstable::generation::GenerationError;
+    match list_live(dir) {
+        // Orphans count: a directory holding only orphans is still a table directory, and the verb
+        // that lists it names them (diff refuses the side; explain has nothing live to explain).
+        Ok(listing) => Ok(!listing.live.is_empty() || !listing.orphans.is_empty()),
+        Err(
+            GenerationError::TxnInconsistent { .. }
+            | GenerationError::TxnLogUnreadable { .. }
+            | GenerationError::TxnLogName { .. },
+        ) => Ok(true),
+        Err(error) => Err(format!("could not inspect {}: {error}", dir.display())),
+    }
+}
+
+/// Whether `root` is itself `<table-dir>/snapshots/<tag>` of a table named `table_name`: such a
+/// directory is a table directory in its own right, its generations its own Live set (GD6.1).
+fn is_snapshot_dir_of(root: &Path, table_name: &str) -> bool {
+    let snapshots = root.parent();
+    let table_dir = snapshots.and_then(Path::parent);
+    snapshots
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        == Some("snapshots")
+        && table_dir
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| dir_name_matches_table(n, table_name))
 }
 
 /// Resolve the one table directory for `keyspace.table_name` at or below `root`.
@@ -75,7 +112,7 @@ pub(crate) fn resolve_table_dir(
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| dir_name_matches_table(name, table_name));
-    if root_matches && has_live_generations(root)? {
+    if (root_matches || is_snapshot_dir_of(root, table_name)) && has_live_generations(root)? {
         return Ok(root.to_path_buf());
     }
 

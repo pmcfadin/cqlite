@@ -21,75 +21,60 @@ mod tests {
         );
     }
 
+    /// The scan reads the version letter, id and format from the generation module's listing
+    /// (VG1: `da`/`bti` and `oa` are carried like `nb`), and a non-SSTable name is not a file of
+    /// any generation.
     #[test]
-    fn test_parse_sstable_filename() {
-        let (version, generation, fmt, comp) = scan::parse_sstable_filename("nb-1-big-Data.db")
-            .unwrap()
-            .unwrap();
-        assert_eq!(version, "nb");
-        assert_eq!(generation, 1);
-        assert_eq!(fmt, "big");
-        assert_eq!(comp, types::SSTableComponent::Data);
-
-        // da/bti files are now supported (VG1: FormatDetector maps `da` to V5x)
-        let (version, generation, fmt, comp) = scan::parse_sstable_filename("da-2-bti-Rows.db")
-            .unwrap()
-            .unwrap();
-        assert_eq!(version, "da");
-        assert_eq!(generation, 2);
-        assert_eq!(fmt, "bti");
-        assert_eq!(comp, types::SSTableComponent::Rows);
-
-        assert!(scan::parse_sstable_filename("not-an-sstable.txt")
-            .unwrap()
-            .is_none());
-    }
-
-    /// VG1: parse_sstable_filename now carries the version letter for each filename.
-    #[test]
-    fn test_parse_sstable_filename_version_letter() {
-        for (filename, expected_version) in &[
-            ("nb-1-big-Data.db", "nb"),
-            ("oa-1-big-Data.db", "oa"),
-            ("da-1-bti-Data.db", "da"),
+    fn test_scan_carries_version_generation_and_format() {
+        let temp_dir = TempDir::new().unwrap();
+        for file in [
+            "nb-1-big-Data.db",
+            "oa-2-big-Data.db",
+            "da-3-bti-Data.db",
+            "da-3-bti-Rows.db",
+            "not-an-sstable.txt",
         ] {
-            let (version, _gen, _fmt, _comp) =
-                scan::parse_sstable_filename(filename).unwrap().unwrap();
-            assert_eq!(
-                &version, expected_version,
-                "version mismatch for {}",
-                filename
-            );
+            fs::write(temp_dir.path().join(file), "x").unwrap();
         }
+        let generations = scan::scan_sstable_files(temp_dir.path(), "t").unwrap();
+        let seen: Vec<(u32, &str, &str, usize)> = generations
+            .iter()
+            .map(|g| {
+                (
+                    g.generation,
+                    g.version.as_str(),
+                    g.format.as_str(),
+                    g.components.len(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (3, "da", "bti", 2),
+                (2, "oa", "big", 1),
+                (1, "nb", "big", 1)
+            ]
+        );
     }
 
-    /// Test for Issue #232: parse_sstable_filename should ignore auxiliary files
-    /// (.jsonl, .db.txt) that exist alongside valid SSTable components
+    /// Task 3.5: a UUID-id generation is a named refusal, not a silent skip.
     #[test]
-    fn test_parse_sstable_filename_ignores_auxiliary_files() {
-        // Should return None for JSONL validation files
-        assert!(scan::parse_sstable_filename("nb-1-big-Data.db.jsonl")
-            .unwrap()
-            .is_none());
-
-        // Should return None for human-readable stats dumps
-        assert!(scan::parse_sstable_filename("nb-1-big-Statistics.db.txt")
-            .unwrap()
-            .is_none());
-
-        // Should return None for other auxiliary extensions
-        assert!(scan::parse_sstable_filename("nb-1-big-Data.db.json")
-            .unwrap()
-            .is_none());
-
-        // Should still parse valid SSTable files correctly
-        let (version, generation, fmt, comp) = scan::parse_sstable_filename("nb-1-big-Data.db")
-            .unwrap()
-            .unwrap();
-        assert_eq!(version, "nb");
-        assert_eq!(generation, 1);
-        assert_eq!(fmt, "big");
-        assert_eq!(comp, types::SSTableComponent::Data);
+    fn test_scan_names_a_uuid_generation_instead_of_skipping_it() {
+        let temp_dir = TempDir::new().unwrap();
+        for file in [
+            "nb-1-big-Data.db",
+            "nb-3h5t_0i6r_2dipm2lxu6305iz8wl-big-Data.db",
+        ] {
+            fs::write(temp_dir.path().join(file), "x").unwrap();
+        }
+        let error = scan::scan_sstable_files(temp_dir.path(), "t").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("nb-3h5t_0i6r_2dipm2lxu6305iz8wl-big"),
+            "{error}"
+        );
     }
 
     /// Test for Issue #232: Directory scan should succeed with auxiliary files present

@@ -24,7 +24,6 @@
 //! know" (issue #1653's honest `Option` fields feed this directly).
 
 pub mod deep_scan;
-mod discover;
 mod droppable_ratio;
 pub mod reclaim_prediction;
 pub mod token_overlap;
@@ -33,16 +32,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
-use crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback_detailed;
-use crate::parser::repair_metadata::diagnose_fields::{
-    read_cell_per_partition_stats, read_compression_ratio, read_stats_minimums,
-};
-use crate::parser::repair_metadata::{parse_repair_metadata, RepairField};
+use crate::parser::repair_metadata::RepairField;
 use crate::parser::statistics::SSTableStatistics;
 use crate::platform::Platform;
 use crate::schema::TableSchema;
+use crate::storage::sstable::generation::{
+    list_generations, Condition, DirectoryNote, Generation, Scope, StatisticsFacts, TocPolicy,
+};
 use crate::storage::sstable::reader::SSTableReader;
-use crate::storage::sstable::version_gate::{SsTableDescriptor, VersionGates};
 use crate::storage::write_engine::merge::fully_expired::is_fully_expired;
 use crate::Config;
 
@@ -141,7 +138,7 @@ impl<T> SourcedField<T> {
 #[derive(Debug, Clone)]
 pub struct GenerationDiagnosis {
     /// The real on-disk sstable id: Cassandra's sequential integer (`"12"`) or a UUID-based id
-    /// (`"3gkx_1f1t_2z5ah8vjn8sd9d8sjh"`), exactly as it appears in the file name.
+    /// (`"3h5t_0i6r_2dipm2lxu6305iz8wl"`), exactly as it appears in the file name.
     pub generation: String,
     /// Two-letter on-disk format version, e.g. `"nb"`, `"oa"`, `"da"`.
     pub format: String,
@@ -160,6 +157,9 @@ pub struct GenerationDiagnosis {
     pub compression_ratio: SourcedField<f64>,
     pub fully_expired_at_now: bool,
     pub deep: Option<DeepGenerationReport>,
+    /// Conditions the listing attached to this generation (GD8): `TocMissing` is the only one a
+    /// readable generation can carry. Empty for a healthy generation.
+    pub conditions: Vec<Condition>,
 }
 
 /// One generation's `--deep` results (spec R3).
@@ -199,6 +199,9 @@ pub struct DiagnoseReport {
     /// Generations this run could not read, each with its cause (spec R6: a field of the
     /// report, never a refusal). Never silently absent.
     pub unreadable_generations: Vec<UnreadableGeneration>,
+    /// Directory-level facts from the listing (a transaction log with corrupt records, a relocated
+    /// log): not generation conditions, so a caller reports them beside the report (Q44, Q47).
+    pub notes: Vec<DirectoryNote>,
 }
 
 /// A generation `diagnose` could not read, and why.
@@ -211,17 +214,33 @@ pub struct UnreadableGeneration {
 /// Run `diagnose` over every SSTable generation directly under `table_dir`
 /// (spec R1-R5, plus R3/R4 under `--deep`).
 pub async fn diagnose_table(table_dir: &Path, options: &DiagnoseOptions) -> Result<DiagnoseReport> {
-    let discovered = discover::discover(table_dir).map_err(|e| {
+    diagnose_table_with(table_dir, options, Arc::new(read_checked_statistics)).await
+}
+
+/// The injected `Statistics.db` read. `Send + Sync + 'static` so the (blocking) load can run off
+/// the async executor and the diagnose futures stay `Send`.
+pub type StatisticsRead = Arc<dyn Fn(&Path) -> Result<Vec<u8>> + Send + Sync>;
+
+/// [`diagnose_table`] with the one `Statistics.db` read injected, so a test can count opens (GD9).
+/// Every `Statistics.db` field the run reports comes through this read, once per generation.
+#[doc(hidden)]
+pub async fn diagnose_table_with(
+    table_dir: &Path,
+    options: &DiagnoseOptions,
+    read: StatisticsRead,
+) -> Result<DiagnoseReport> {
+    // GD8: Scope Live, `TocMissing` accepted. A directory the module cannot resolve (an
+    // inconsistent transaction state, an unlistable directory) is a usage error (exit 1).
+    let listing = list_generations(table_dir, &Scope::Live, TocPolicy::Accept).map_err(|e| {
         Error::invalid_path(format!(
-            "Cannot read SSTable table dir {}: {}",
+            "Cannot resolve SSTable table dir {}: {}",
             table_dir.display(),
             e
         ))
     })?;
-    let data_paths = discovered.data_paths;
-    if data_paths.is_empty() && discovered.unreadable_entries.is_empty() {
+    if listing.live.is_empty() && listing.orphans.is_empty() {
         return Err(Error::not_found(format!(
-            "no SSTable generations (*-Data.db) found under {}",
+            "no SSTable generations found under {}",
             table_dir.display()
         )));
     }
@@ -242,25 +261,26 @@ pub async fn diagnose_table(table_dir: &Path, options: &DiagnoseOptions) -> Resu
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await?);
 
-    let mut generations = Vec::with_capacity(data_paths.len());
+    let mut generations = Vec::with_capacity(listing.live.len());
     let mut reclaim_inputs: Vec<ReclaimInput> = Vec::new();
     let mut unreadable_generations = Vec::new();
     let mut token_spans: Vec<(i64, i64)> = Vec::new();
     // Generations contributing NO token span (unreadable, or endpoint tokens not decodable): the
     // histogram would silently undercount them, so any entry makes it `unmeasured`.
     let mut without_span: Vec<String> = Vec::new();
-    // An unreadable directory entry may have been a generation: report it and keep the token
-    // histogram honest about it.
-    for cause in discovered.unreadable_entries {
-        without_span.push("<unreadable directory entry>".to_string());
-        unreadable_generations.push(UnreadableGeneration {
-            data_path: table_dir.to_path_buf(),
-            cause,
-        });
-    }
-
-    for data_path in &data_paths {
-        match diagnose_generation(data_path, options, gc_before, &config, platform.clone()).await {
+    for generation in &listing.live {
+        let data_path = data_path_of(generation);
+        match diagnose_generation(
+            generation,
+            &data_path,
+            options,
+            gc_before,
+            &config,
+            platform.clone(),
+            &read,
+        )
+        .await
+        {
             Ok((gen_report, token_span)) => {
                 match token_span {
                     Some(span) => token_spans.push(span),
@@ -279,11 +299,20 @@ pub async fn diagnose_table(table_dir: &Path, options: &DiagnoseOptions) -> Resu
             Err(e) => {
                 without_span.push(data_path.display().to_string());
                 unreadable_generations.push(UnreadableGeneration {
-                    data_path: data_path.clone(),
+                    data_path,
                     cause: e.to_string(),
                 });
             }
         }
+    }
+    // GD8.1: an Orphan (Data.db missing or zero-length) is reported, never diagnosed.
+    for orphan in &listing.orphans {
+        let data_path = data_path_of(orphan);
+        without_span.push(data_path.display().to_string());
+        unreadable_generations.push(UnreadableGeneration {
+            data_path,
+            cause: "Orphan: Data.db is missing or zero-length".to_string(),
+        });
     }
 
     let counts = if without_span.is_empty() {
@@ -316,7 +345,25 @@ pub async fn diagnose_table(table_dir: &Path, options: &DiagnoseOptions) -> Resu
         },
         reclaim_at_now,
         unreadable_generations,
+        notes: listing.notes,
     })
+}
+
+/// The production read: bounded, then the strict integrity check.
+fn read_checked_statistics(path: &Path) -> Result<Vec<u8>> {
+    crate::storage::sstable::statistics_reader::integrity::read_checked_statistics(path)
+}
+
+/// Where this generation's `Data.db` is (or would be, for an Orphan whose `Data.db` is gone).
+fn data_path_of(generation: &Generation) -> PathBuf {
+    generation
+        .component_path("Data.db")
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| {
+            generation
+                .directory()
+                .join(format!("{}-Data.db", generation.base_name()))
+        })
 }
 
 /// The table-wide dry major-compaction prediction (owner ruling 2026-11-14): every generation
@@ -379,66 +426,60 @@ async fn table_reclaim(
 /// that generation from the histogram rather than guessing; see the module's
 /// implementer-report note on BTI token-overlap scope).
 async fn diagnose_generation(
+    generation: &Generation,
     data_path: &Path,
     options: &DiagnoseOptions,
     gc_before: Option<i64>,
     config: &Config,
     platform: Arc<Platform>,
-) -> Result<(GenerationDiagnosis, Option<(i64, i64)>)> {
-    let stats_path = stats_path_for(data_path);
-    // #1249 floor gate: derive from the filename BEFORE any parse, mirroring
-    // `StatisticsReader::open`.
-    let gates = match VersionGates::from_path(&stats_path) {
-        Ok(g) => Some(g),
-        Err(e @ Error::UnsupportedVersion { .. }) => return Err(e),
-        Err(_) => None,
+    read: &StatisticsRead,
+) -> std::result::Result<(GenerationDiagnosis, Option<(i64, i64)>), String> {
+    // GD8, GD9: the floor, the bounded read, the strict integrity check (#4612) and the one parse
+    // are the generation's trusted-metadata accessor. A failure becomes this generation's
+    // `unreadable_generations` entry (R6) with the condition named in the cause.
+    let named = |failure: crate::storage::sstable::generation::MetadataFailure| {
+        format!("{}: {failure}", failure.condition())
     };
+    // The read is blocking (up to MAX_STATISTICS_BYTES), so it runs on the blocking pool. The
+    // generation's cache is shared by the clone: still one read per generation (GD9), and the
+    // buffer is dropped inside the loader.
+    let (g, r) = (generation.clone(), read.clone());
+    let (stats, facts) = tokio::task::spawn_blocking(move || {
+        let stats = g.trusted_metadata_via(&*r).map_err(named)?;
+        let facts = g.statistics_facts_via(&*r).map_err(named)?;
+        Ok::<_, String>((stats, facts))
+    })
+    .await
+    .map_err(|e| format!("Statistics.db load task failed: {e}"))??;
+    diagnose_loaded_generation(
+        generation, data_path, options, gc_before, config, platform, &stats, &facts,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
 
-    // #4612: read under the strict TOC/CRC check, so a truncated or corrupt Statistics.db makes
-    // this generation an `unreadable_generations` entry (R6) naming the path, never a report
-    // computed from a partial parse. Absence keeps its existing wording.
-    let stats_bytes =
-        match crate::storage::sstable::statistics_reader::integrity::read_checked_statistics_async(
-            &stats_path,
-        )
-        .await
-        {
-            Ok(bytes) => bytes,
-            Err(Error::Io(e)) => {
-                return Err(Error::not_found(format!(
-                    "Statistics.db not found/readable for {}: {}",
-                    data_path.display(),
-                    e
-                )))
-            }
-            Err(e) => return Err(e),
-        };
+/// The rest of [`diagnose_generation`], once the trusted metadata is in hand.
+#[allow(clippy::too_many_arguments)]
+async fn diagnose_loaded_generation(
+    generation: &Generation,
+    data_path: &Path,
+    options: &DiagnoseOptions,
+    gc_before: Option<i64>,
+    config: &Config,
+    platform: Arc<Platform>,
+    stats: &SSTableStatistics,
+    facts: &StatisticsFacts,
+) -> Result<(GenerationDiagnosis, Option<(i64, i64)>)> {
+    let repair = &facts.repair;
+    let cell_per_partition = facts.cell_per_partition;
+    let compression_ratio_raw = facts.compression_ratio;
 
-    let (_, stats): (&[u8], SSTableStatistics) =
-        parse_statistics_with_fallback_detailed(&stats_bytes, gates.as_ref())?;
-
-    let repair = parse_repair_metadata(&stats_bytes, gates.as_ref())?;
-    let cell_per_partition = read_cell_per_partition_stats(&stats_bytes)?;
-    let compression_ratio_raw = read_compression_ratio(&stats_bytes)?;
-
-    let descriptor = SsTableDescriptor::parse(data_path).ok();
-    let format = descriptor
-        .as_ref()
-        .map(|d| d.version.clone())
-        .unwrap_or_default();
-    // The generation id comes from the FILENAME's own sstable-id segment (spec R5.1: `Data.db`
-    // is never opened in the cheap tier, so not from its header), kept as the STRING Cassandra
-    // wrote — an integer id (`nb-12-big-…`) or a UUID-based id (`nb-3gkx_…-big-…`); never
-    // coerced to a number, which would collapse every UUID id to one label.
-    let generation = descriptor
-        .as_ref()
-        .map(|d| d.sstable_id.clone())
-        .ok_or_else(|| {
-            Error::corruption(format!(
-                "{} is not a valid SSTable file name (no parseable sstable id)",
-                data_path.display()
-            ))
-        })?;
+    let format = generation.version().to_string();
+    // The generation id comes from the descriptor (spec R5.1: `Data.db` is never opened in the
+    // cheap tier), kept as the STRING Cassandra wrote - an integer id (`nb-12-big-...`) or a
+    // UUID-based id (`nb-3gkx_...-big-...`); never coerced to a number, which would collapse every
+    // UUID id to one label.
+    let generation_id = generation.id().to_string();
 
     // First/last partition-key tokens for the table-wide token-overlap
     // histogram (spec R4, D4) come from `Summary.db` ALONE (BIG only — BTI has
@@ -453,22 +494,21 @@ async fn diagnose_generation(
 
     // The STATS component's OWN minimums (what `sstablemetadata` prints) — not the
     // serialization-header EncodingStats baselines `timestamp_stats` carries.
-    let (min_timestamp, min_local_deletion_time) =
-        read_stats_minimums(&stats_bytes, gates.as_ref())?.ok_or_else(|| {
-            Error::corruption("Statistics.db carries no STATS component".to_string())
-        })?;
-    let max_timestamp = max_timestamp_field(&stats);
-    let estimated_partition_count = estimated_partition_count_field(&stats);
+    let (min_timestamp, min_local_deletion_time) = facts
+        .minimums
+        .ok_or_else(|| Error::corruption("Statistics.db carries no STATS component".to_string()))?;
+    let max_timestamp = max_timestamp_field(stats);
+    let estimated_partition_count = estimated_partition_count_field(stats);
 
     let (estimated_droppable_tombstone_ratio, gc_before_for_ratio) =
         droppable_tombstone_ratio_field(
-            &stats,
+            stats,
             cell_per_partition.as_ref(),
             gc_before,
             options.now_secs,
         );
 
-    let pending_repair = pending_repair_field(&repair);
+    let pending_repair = pending_repair_field(repair);
     let compression_ratio = compression_ratio_field(compression_ratio_raw);
 
     let fully_expired_at_now = match gc_before {
@@ -495,7 +535,7 @@ async fn diagnose_generation(
 
     Ok((
         GenerationDiagnosis {
-            generation,
+            generation: generation_id,
             format,
             min_timestamp,
             max_timestamp,
@@ -509,6 +549,7 @@ async fn diagnose_generation(
             compression_ratio,
             fully_expired_at_now,
             deep,
+            conditions: generation.conditions().to_vec(),
         },
         token_span,
     ))
@@ -616,11 +657,6 @@ pub fn compression_ratio_field(ratio: Option<f64>) -> SourcedField<f64> {
     }
 }
 
-/// Sibling `Statistics.db` path for a `Data.db` path.
-fn stats_path_for(data_path: &Path) -> PathBuf {
-    sibling_component_path(data_path, "Statistics.db")
-}
-
 /// Sibling `Summary.db` path for a `Data.db` path (BIG format only).
 fn summary_path_for(data_path: &Path) -> PathBuf {
     sibling_component_path(data_path, "Summary.db")
@@ -706,15 +742,6 @@ fn hex_uuid(bytes: &[u8; 16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn stats_path_replaces_data_suffix() {
-        let p = PathBuf::from("/a/b/nb-1-big-Data.db");
-        assert_eq!(
-            stats_path_for(&p),
-            PathBuf::from("/a/b/nb-1-big-Statistics.db")
-        );
-    }
 
     #[test]
     fn hex_uuid_renders_lowercase_hex() {

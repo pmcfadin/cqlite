@@ -146,7 +146,8 @@ fn stitch(a: &Path, b: &Path, b_gen: &str) -> tempfile::TempDir {
             };
             let dest = tmp.path().join(&dest_name);
             if dest_name.ends_with("-Data.db") {
-                std::fs::write(&dest, b"").expect("empty Data.db");
+                // Placeholder content, not zero-length: an empty Data.db is an Orphan (G4, #4626).
+                std::fs::write(&dest, b"x").expect("placeholder Data.db");
             } else {
                 std::fs::copy(&p, &dest).expect("copy");
             }

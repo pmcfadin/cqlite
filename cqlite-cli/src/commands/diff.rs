@@ -3,7 +3,7 @@
 //! READ-ONLY. Nothing here opens an input for writing, creates a file or modifies either snapshot
 //! directory; the report is rendered to stdout only (like `explain`, `diff` does not accept the
 //! global `--output`/`--overwrite` file-write flags). Each side is resolved exactly as `explain`
-//! resolves a table directory (`explain_resolve::{resolve_table_dir, discover_live_generations}`:
+//! resolves a table directory (`explain_resolve::{resolve_table_dir, resolve_generations}`:
 //! live generations only, never `snapshots/`, `backups/` or index subdirectories).
 //!
 //! Exit codes: 0 = a report was rendered (divergence and resurrection risk are findings, not
@@ -74,8 +74,14 @@ fn resolve_side(
     root: &std::path::Path,
     keyspace: &str,
     table: &str,
-) -> std::result::Result<cqlite_core::storage::write_engine::snapshot_diff::DiffSide, Failure> {
-    use crate::commands::explain_resolve::{discover_live_generations, resolve_table_dir};
+) -> std::result::Result<
+    (
+        cqlite_core::storage::write_engine::snapshot_diff::DiffSide,
+        Vec<String>,
+    ),
+    Failure,
+> {
+    use crate::commands::explain_resolve::{resolve_generations, resolve_table_dir};
     if !root.is_dir() {
         return Err(Failure::usage(format!(
             "side={label}: {} does not exist or is not a directory",
@@ -84,19 +90,39 @@ fn resolve_side(
     }
     let dir = resolve_table_dir(root, keyspace, table)
         .map_err(|error| Failure::usage(format!("side={label}: {error}")))?;
-    let generations = discover_live_generations(&dir).map_err(|error| {
-        Failure::read(format!(
-            "side={label}: could not list {}: {error}",
-            dir.display()
-        ))
-    })?;
+    // GD6: each side is the generation module's Scope Live, `TocMissing` accepted. A condition
+    // that refuses (below floor, `Corrupt`, `Unreadable`, an inconsistent transaction state) is
+    // exit 2 naming the side.
+    let resolved = resolve_generations(&dir)
+        .map_err(|error| Failure::read(format!("side={label}: {error}")))?;
+    crate::commands::generation_listing::print_listing_facts("diff", &resolved.listing);
+    // A side holding an Orphan (Data.db missing or zero-length) is REFUSED: dropping it and
+    // continuing could report a false divergence or resurrection (#4671).
+    if !resolved.listing.orphans.is_empty() {
+        return Err(Failure::read(format!(
+            "side={label}: refusing {} with an Orphan generation (Data.db missing or zero-length): {}",
+            dir.display(),
+            resolved
+                .listing
+                .orphans
+                .iter()
+                .map(|o| crate::commands::generation_listing::data_path(o).display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    let listed_names = resolved.listed_names;
+    let generations = resolved.input_paths;
     if generations.is_empty() {
         return Err(Failure::usage(format!(
             "side={label}: no published SSTable generations found under {}",
             dir.display()
         )));
     }
-    Ok(cqlite_core::storage::write_engine::snapshot_diff::DiffSide { dir, generations })
+    Ok((
+        cqlite_core::storage::write_engine::snapshot_diff::DiffSide { dir, generations },
+        listed_names,
+    ))
 }
 
 #[cfg(feature = "write-support")]
@@ -124,8 +150,11 @@ async fn run_diff(
             args.table
         )));
     }
-    let side_a = resolve_side("a", &args.dir_a, keyspace, table_name)?;
-    let side_b = resolve_side("b", &args.dir_b, keyspace, table_name)?;
+    // The names each side's header shows are the generation module's (module order, the
+    // `(toc-missing)` suffix); `DiffSide` keeps its public shape and the CLI applies them to the
+    // report it renders.
+    let (side_a, names_a) = resolve_side("a", &args.dir_a, keyspace, table_name)?;
+    let (side_b, names_b) = resolve_side("b", &args.dir_b, keyspace, table_name)?;
 
     let schema = crate::commands::write::load_compaction_table_schema_in_keyspace(
         schema_path,
@@ -202,6 +231,9 @@ async fn run_diff(
             other => Failure::usage(other.to_string()),
         },
     })?;
+    let mut report = report;
+    report.side_a.generations = names_a;
+    report.side_b.generations = names_b;
     let rendered =
         crate::commands::diff_render::render(&report, args.out == DiffOutput::Json, &now)
             .map_err(Failure::read)?;

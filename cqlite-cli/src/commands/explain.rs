@@ -131,8 +131,13 @@ fn run_explain(
     let table_dir =
         crate::commands::explain_resolve::resolve_table_dir(&root, keyspace, table_name)
             .map_err(ExplainFailure::Usage)?;
-    let input_paths = crate::commands::explain_resolve::discover_live_generations(&table_dir)
-        .map_err(|error| read_failure(&input_paths_for_error(&table_dir), error))?;
+    // GD5: the generation module's Live set, `TocMissing` accepted. Below-floor, corrupt or
+    // unreadable generations and an inconsistent transaction state exit 2 naming the path (R8).
+    let resolved = crate::commands::explain_resolve::resolve_generations(&table_dir)
+        .map_err(ExplainFailure::Read)?;
+    crate::commands::generation_listing::print_listing_facts("explain", &resolved.listing);
+    let listed_names = resolved.listed_names;
+    let input_paths = resolved.input_paths;
     if input_paths.is_empty() {
         return Err(ExplainFailure::Usage(format!(
             "no published SSTable generations found under {}",
@@ -166,12 +171,6 @@ fn run_explain(
     let clustering_key = parse_clustering_key(clustering, &schema)
         .map_err(|error| ExplainFailure::Usage(format!("invalid clustering key: {error}")))?;
     let now_value = resolve_now(now).map_err(|error| ExplainFailure::Usage(error.to_string()))?;
-    // #4612: a truncated or corrupt Statistics.db would silently re-order columns and re-base
-    // every timestamp in the trace, so it is a named read failure instead.
-    cqlite_core::storage::sstable::statistics_reader::integrity::require_checked_statistics(
-        &input_paths,
-    )
-    .map_err(|error| read_failure(&input_paths, error))?;
     let effective_schema = cqlite_core::storage::write_engine::merge::effective_compaction_schema(
         &schema,
         &input_paths,
@@ -248,6 +247,7 @@ fn run_explain(
 
     let report = ExplainReport::from_trace(
         now_value.epoch_secs,
+        listed_names,
         input_paths,
         probes,
         cells,
@@ -454,11 +454,6 @@ fn gc_grace_seconds(schema: &cqlite_core::schema::TableSchema) -> i64 {
         .and_then(|value| value.trim().parse::<i64>().ok())
         .filter(|value| *value >= 0)
         .unwrap_or(864_000)
-}
-
-#[cfg(feature = "write-support")]
-fn input_paths_for_error(dir: &Path) -> Vec<std::path::PathBuf> {
-    vec![dir.to_path_buf()]
 }
 
 #[cfg(feature = "write-support")]

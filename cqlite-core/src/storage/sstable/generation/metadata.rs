@@ -30,8 +30,48 @@ const STATISTICS_COMPONENT: &str = "Statistics.db";
 
 /// The shared, lazily filled cache of one generation's metadata outcome. Cloning a
 /// [`Generation`] shares it, so a failure is judged once however many copies exist.
-pub(super) type MetadataCell =
-    Arc<OnceLock<std::result::Result<Arc<SSTableStatistics>, MetadataFailure>>>;
+pub(super) type MetadataCell = Arc<OnceLock<std::result::Result<Loaded, MetadataFailure>>>;
+
+/// What one successful load keeps: the parsed value and the small STATS fields `diagnose` needs
+/// that the typed value does not carry. The `Statistics.db` bytes themselves are NOT kept: a file
+/// may be up to `MAX_STATISTICS_BYTES` and a listing holds one cell per generation, so retaining
+/// them would hold every generation's buffer for the whole run.
+#[derive(Debug, Clone)]
+pub(super) struct Loaded {
+    stats: Arc<SSTableStatistics>,
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+    facts: std::result::Result<Arc<StatisticsFacts>, String>,
+}
+
+/// STATS fields decoded once, inside the loader, from the same bytes as the typed value.
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+#[derive(Debug, Clone)]
+pub struct StatisticsFacts {
+    pub(crate) repair: crate::parser::repair_metadata::RepairMetadata,
+    pub(crate) cell_per_partition:
+        Option<crate::parser::repair_metadata::diagnose_fields::CellPerPartitionStats>,
+    pub(crate) compression_ratio: Option<f64>,
+    /// The STATS component's own `(minTimestamp, minLocalDeletionTime)`.
+    pub(crate) minimums: Option<(i64, i64)>,
+}
+
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+fn decode_facts(
+    bytes: &[u8],
+    gates: &VersionGates,
+) -> std::result::Result<StatisticsFacts, String> {
+    use crate::parser::repair_metadata::diagnose_fields::{
+        read_cell_per_partition_stats, read_compression_ratio, read_stats_minimums,
+    };
+    let e = |e: Error| e.to_string();
+    Ok(StatisticsFacts {
+        repair: crate::parser::repair_metadata::parse_repair_metadata(bytes, Some(gates))
+            .map_err(e)?,
+        cell_per_partition: read_cell_per_partition_stats(bytes).map_err(e)?,
+        compression_ratio: read_compression_ratio(bytes).map_err(e)?,
+        minimums: read_stats_minimums(bytes, Some(gates)).map_err(e)?,
+    })
+}
 
 /// Why a generation's trusted metadata is unavailable. Each variant is one [`Condition`].
 #[derive(Debug, Clone, thiserror::Error)]
@@ -110,15 +150,57 @@ impl Generation {
         &self,
         read: &dyn Fn(&Path) -> Result<Vec<u8>>,
     ) -> std::result::Result<Arc<SSTableStatistics>, MetadataFailure> {
+        self.loaded_with(read).map(|l| l.stats)
+    }
+
+    fn loaded_with(
+        &self,
+        read: &dyn Fn(&Path) -> Result<Vec<u8>>,
+    ) -> std::result::Result<Loaded, MetadataFailure> {
         self.metadata
             .get_or_init(|| self.load_metadata(read))
             .clone()
     }
 
-    fn load_metadata(
+    /// The STATS fields `diagnose` reports beyond the typed value, from the same single read
+    /// (G11, GD9). A decode failure is `Corrupt`, naming the file.
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+    pub fn statistics_facts(&self) -> std::result::Result<Arc<StatisticsFacts>, MetadataFailure> {
+        self.statistics_facts_via(&read_checked)
+    }
+
+    /// [`Generation::statistics_facts`] with the file read injected. Not part of the stable
+    /// surface.
+    #[doc(hidden)]
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+    pub fn statistics_facts_via(
+        &self,
+        read: &dyn Fn(&Path) -> Result<Vec<u8>>,
+    ) -> std::result::Result<Arc<StatisticsFacts>, MetadataFailure> {
+        self.loaded_with(read)?
+            .facts
+            .map_err(|detail| MetadataFailure::Corrupt {
+                path: self
+                    .directory
+                    .join(format!("{}-{STATISTICS_COMPONENT}", self.base_name())),
+                detail,
+            })
+    }
+
+    /// [`Generation::trusted_metadata`] with the file read injected, so a caller can count or
+    /// forbid opens (the GD9 one-read-per-run proof). Not part of the stable surface.
+    #[doc(hidden)]
+    pub fn trusted_metadata_via(
         &self,
         read: &dyn Fn(&Path) -> Result<Vec<u8>>,
     ) -> std::result::Result<Arc<SSTableStatistics>, MetadataFailure> {
+        self.trusted_metadata_with(read)
+    }
+
+    fn load_metadata(
+        &self,
+        read: &dyn Fn(&Path) -> Result<Vec<u8>>,
+    ) -> std::result::Result<Loaded, MetadataFailure> {
         // 1. The floor, from the descriptor alone: no file has been touched.
         if let Some(below) = &self.below_floor {
             return Err(MetadataFailure::UnsupportedVersion {
@@ -152,8 +234,16 @@ impl Generation {
             path: path.clone(),
             detail: e.to_string(),
         })?;
-        match parse_statistics_with_fallback_detailed(&bytes, Some(&gates)) {
-            Ok((_, stats)) => Ok(Arc::new(stats)),
+        let parsed = parse_statistics_with_fallback_detailed(&bytes, Some(&gates)).map(|(_, s)| s);
+        // The facts are decoded from the same buffer; it is dropped when this function returns.
+        #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+        let facts = decode_facts(&bytes, &gates).map(Arc::new);
+        match parsed {
+            Ok(stats) => Ok(Loaded {
+                stats: Arc::new(stats),
+                #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+                facts,
+            }),
             Err(e) => Err(MetadataFailure::Corrupt {
                 path,
                 detail: e.to_string(),

@@ -336,44 +336,6 @@ fn record_naming_another_table_id_does_not_apply() {
     assert_eq!(l.txn_logs.len(), 1);
 }
 
-/// A copy of a committed fixture (same keyspace and table directory names, another absolute
-/// prefix) with each REMOVE record's files given the record's `updateTime` as their mtime: a git
-/// checkout loses the mtimes Cassandra's verification compares, so without this the copy's REMOVE
-/// records fail verification, exactly as they would for Cassandra.
-fn stamped_fixture_copy(state: &str) -> (tempfile::TempDir, std::path::PathBuf) {
-    let src = fixture_table(state, "txn_compaction");
-    let root = tempfile::tempdir().unwrap();
-    let dir = root.path().join("gd4626").join(src.file_name().unwrap());
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut stamps: Vec<(String, u64)> = Vec::new();
-    for entry in std::fs::read_dir(&src).unwrap().filter_map(|e| e.ok()) {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        std::fs::copy(entry.path(), dir.join(&name)).unwrap();
-        if name.ends_with(".log") {
-            for line in std::fs::read_to_string(entry.path()).unwrap().lines() {
-                if let Some(rest) = line.strip_prefix("REMOVE:[") {
-                    let mut parts = rest.split(',');
-                    let path = parts.next().unwrap();
-                    let ms: u64 = parts.next().unwrap().parse().unwrap();
-                    stamps.push((path.rsplit('/').next().unwrap().to_string(), ms));
-                }
-            }
-        }
-    }
-    for entry in std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()) {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some((_, ms)) = stamps.iter().find(|(p, _)| name.starts_with(p.as_str())) {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(entry.path())
-                .unwrap()
-                .set_modified(UNIX_EPOCH + Duration::from_millis(*ms))
-                .unwrap();
-        }
-    }
-    (root, dir)
-}
-
 /// G1.1 on the Cassandra-written fixture itself.
 #[test]
 fn spec_g1_1_on_the_cassandra_written_fixture() {

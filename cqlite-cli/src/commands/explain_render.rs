@@ -43,6 +43,10 @@ struct ExplainTombstone {
 #[derive(Debug, serde::Serialize)]
 pub(super) struct ExplainReport {
     now: i64,
+    /// The first line's generation list (GD5): id order, `(toc-missing)` suffixed. Not part of
+    /// the body: run indices and `sstable` names below keep R7's newest-first shape.
+    #[serde(skip)]
+    listed: Vec<String>,
     generations: Vec<ExplainGeneration>,
     cells: Vec<ExplainCell>,
     tombstones: Vec<ExplainTombstone>,
@@ -52,6 +56,7 @@ pub(super) struct ExplainReport {
 impl ExplainReport {
     pub(super) fn from_trace(
         now: i64,
+        listed: Vec<String>,
         paths: Vec<std::path::PathBuf>,
         probes: Vec<(
             usize,
@@ -112,6 +117,7 @@ impl ExplainReport {
             .collect();
         Self {
             now,
+            listed,
             generations,
             cells,
             tombstones,
@@ -261,17 +267,11 @@ fn metadata_line(report: &ExplainReport, now: &ExplainNow, gc_grace: i64) -> Str
         .map(|date| date.to_rfc3339())
         .unwrap_or_else(|| report.now.to_string());
     let clock_suffix = if now.wall_clock { " (wall clock)" } else { "" };
-    let names = report
-        .generations
-        .iter()
-        .map(|generation| generation.sstable.as_str())
-        .collect::<Vec<_>>()
-        .join(",");
     format!(
         "now={} ({rendered_time}){clock_suffix}  generations={} [{}]  gc_grace_seconds={gc_grace}",
         report.now,
-        report.generations.len(),
-        names
+        report.listed.len(),
+        report.listed.join(", ")
     )
 }
 

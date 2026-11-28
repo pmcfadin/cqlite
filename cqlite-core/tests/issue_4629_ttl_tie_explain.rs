@@ -55,7 +55,7 @@ fn schema() -> TableSchema {
     panic!("no CREATE TABLE in {}", path.display());
 }
 
-/// Newest generation first, the order `cqlite explain` passes (`discover_live_generations`).
+/// Newest generation first, the order `cqlite explain` passes (`explain_resolve::resolve_generations`).
 fn generations_newest_first() -> Vec<PathBuf> {
     let mut found: Vec<(u64, PathBuf)> = std::fs::read_dir(fixture().join("sstables"))
         .expect("fixture sstables dir")
