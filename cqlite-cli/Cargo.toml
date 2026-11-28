@@ -446,6 +446,12 @@ name = "issue_4612_statistics_fail_closed"
 path = "tests/issue_4612_statistics_fail_closed.rs"
 required-features = ["write-support"]
 
+# Issue #4626 phase 2 (closes #4622 and #4623): drives the built `cqlite compact` binary.
+[[test]]
+name = "issue_4626_compact_generations"
+path = "tests/issue_4626_compact_generations.rs"
+required-features = ["write-support"]
+
 # Issue #4612 (roborev round 1): drives `handle_compact` over damaged inputs.
 [[test]]
 name = "issue_4612_compaction_inputs"
