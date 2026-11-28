@@ -54,13 +54,26 @@ pub(crate) fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SS
     // A corrupt transaction-log record is not a refusal (the module classified from the readable
     // records, as Cassandra's startup lister does), but it is not silent either.
     for note in &listing.notes {
-        if let DirectoryNote::CorruptTxnLog { path, reasons } = note {
-            tracing::warn!(
+        match note {
+            DirectoryNote::CorruptTxnLog { path, reasons } => tracing::warn!(
                 "transaction log {} has records that failed verification ({}); \
                  the scan used the readable records",
                 path.display(),
                 reasons.join("; ")
-            );
+            ),
+            DirectoryNote::RelocatedTxnLog {
+                path,
+                original_prefix,
+            } => tracing::warn!(
+                "transaction log {} names {} but was applied to this directory (relocated or \
+                 copied table directory, prefix {})",
+                path.display(),
+                original_prefix.display(),
+                path.parent()
+                    .and_then(Path::parent)
+                    .and_then(Path::parent)
+                    .map_or_else(String::new, |p| p.display().to_string())
+            ),
         }
     }
 
@@ -81,6 +94,12 @@ pub(crate) fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SS
             if let Ok(kind) = SSTableComponent::from_str(&component.name) {
                 components.insert(kind, component.path.clone());
             }
+        }
+        // Only unrecognized auxiliary files (a `.jsonl` dump, a custom component): not an
+        // SSTable generation this reader can open; if nothing else is found the error below
+        // applies, as it did before the generation module.
+        if components.is_empty() {
+            continue;
         }
         generations.push(SSTableGeneration {
             version: listed.version().to_string(),

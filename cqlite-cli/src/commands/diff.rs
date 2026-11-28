@@ -74,7 +74,13 @@ fn resolve_side(
     root: &std::path::Path,
     keyspace: &str,
     table: &str,
-) -> std::result::Result<cqlite_core::storage::write_engine::snapshot_diff::DiffSide, Failure> {
+) -> std::result::Result<
+    (
+        cqlite_core::storage::write_engine::snapshot_diff::DiffSide,
+        Vec<String>,
+    ),
+    Failure,
+> {
     use crate::commands::explain_resolve::{resolve_generations, resolve_table_dir};
     if !root.is_dir() {
         return Err(Failure::usage(format!(
@@ -113,13 +119,10 @@ fn resolve_side(
             dir.display()
         )));
     }
-    Ok(
-        cqlite_core::storage::write_engine::snapshot_diff::DiffSide {
-            dir,
-            generations,
-            listed_names,
-        },
-    )
+    Ok((
+        cqlite_core::storage::write_engine::snapshot_diff::DiffSide { dir, generations },
+        listed_names,
+    ))
 }
 
 #[cfg(feature = "write-support")]
@@ -147,8 +150,11 @@ async fn run_diff(
             args.table
         )));
     }
-    let side_a = resolve_side("a", &args.dir_a, keyspace, table_name)?;
-    let side_b = resolve_side("b", &args.dir_b, keyspace, table_name)?;
+    // The names each side's header shows are the generation module's (module order, the
+    // `(toc-missing)` suffix); `DiffSide` keeps its public shape and the CLI applies them to the
+    // report it renders.
+    let (side_a, names_a) = resolve_side("a", &args.dir_a, keyspace, table_name)?;
+    let (side_b, names_b) = resolve_side("b", &args.dir_b, keyspace, table_name)?;
 
     let schema = crate::commands::write::load_compaction_table_schema_in_keyspace(
         schema_path,
@@ -225,6 +231,9 @@ async fn run_diff(
             other => Failure::usage(other.to_string()),
         },
     })?;
+    let mut report = report;
+    report.side_a.generations = names_a;
+    report.side_b.generations = names_b;
     let rendered =
         crate::commands::diff_render::render(&report, args.out == DiffOutput::Json, &now)
             .map_err(Failure::read)?;

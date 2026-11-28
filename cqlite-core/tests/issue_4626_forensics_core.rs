@@ -278,3 +278,48 @@ fn the_directory_scan_warns_about_a_corrupt_transaction_log() {
         "{logged}"
     );
 }
+
+/// Roborev job 446 (1): a directory whose only files are unrecognized auxiliary components is
+/// not a valid SSTable directory: the scan fails with the same "No valid SSTable files" error as
+/// before the generation module, never an empty-but-valid generation.
+#[test]
+fn an_auxiliary_only_directory_is_not_a_valid_sstable_directory() {
+    let dir = TempDir::new().unwrap();
+    for f in ["nb-1-big-Data.db.jsonl", "nb-1-big-Statistics.db.txt"] {
+        std::fs::write(dir.path().join(f), "aux").unwrap();
+    }
+    let error = SSTableDirectory::scan(dir.path()).unwrap_err();
+    assert!(
+        error.to_string().contains("No valid SSTable files found"),
+        "{error}"
+    );
+}
+
+/// Roborev job 446 (3): a relocated transaction log is warned about, naming the log and both
+/// prefixes (the log's original one and the directory's own).
+#[test]
+fn the_directory_scan_warns_about_a_relocated_transaction_log() {
+    let (_root, dir) = stamped_fixture_copy("txn_committed");
+    let captured = Captured::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(captured.clone())
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let scanned = tracing::subscriber::with_default(subscriber, || SSTableDirectory::scan(&dir));
+    scanned.expect("scan");
+    let logged = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        logged.contains("relocated")
+            && logged.contains("nb_txn_compaction_dcc367f0-e899-11f1-8c24-9315fc18c6f9.log")
+            && logged.contains("/var/lib/cassandra/data")
+            && logged.contains(
+                &dir.parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .display()
+                    .to_string()
+            ),
+        "{logged}"
+    );
+}

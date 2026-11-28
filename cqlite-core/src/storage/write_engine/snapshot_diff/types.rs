@@ -49,10 +49,6 @@ pub struct DiffSide {
     pub dir: PathBuf,
     /// `*-Data.db` paths of the side's live generations, newest first.
     pub generations: Vec<PathBuf>,
-    /// The side's generation names for the report header, OLDEST first, as the caller wants them
-    /// shown (the CLI passes the generation module's names, `(toc-missing)` suffix included).
-    /// Empty: derive them from `generations`' file names.
-    pub listed_names: Vec<String>,
 }
 
 /// Knobs for one diff run.
