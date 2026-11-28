@@ -12,10 +12,13 @@
 //! - `Orphan`: reported by name, never verified as live.
 
 use crate::parser::statistics::SSTableStatistics;
+use crate::storage::sstable::generation::check_floor;
 use crate::storage::sstable::generation::{
-    list_generations, Condition, Generation, Listing, MetadataFailure, Scope, TocPolicy,
+    list_generations, read_direct_trusted, Condition, Generation, Listing, MetadataFailure, Scope,
+    TocPolicy,
 };
-use crate::storage::sstable::version_gate::SsTableFormat;
+use crate::storage::sstable::reader::extract_sstable_base_name;
+use crate::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
 use crate::{Error, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -33,7 +36,16 @@ pub(crate) struct ComponentSet {
     pub(crate) data_path: PathBuf,
     /// The module's `TocMissing` condition: `Data.db` present, `TOC.txt` absent.
     pub(crate) toc_missing: bool,
-    generation: Generation,
+    stats: StatsSource,
+}
+
+/// Where the trusted `Statistics.db` comes from.
+enum StatsSource {
+    /// A listed generation: the module's cached accessor.
+    Listed(Generation),
+    /// An exact path the listing does not return as a `Data.db` (see [`resolve_exact`]): the
+    /// module's trusted direct read of this sibling, or none if the sibling is absent.
+    Direct(Option<PathBuf>, PathBuf),
 }
 
 impl ComponentSet {
@@ -60,7 +72,7 @@ impl ComponentSet {
             present,
             data_path,
             toc_missing: generation.has_condition(Condition::TocMissing),
-            generation,
+            stats: StatsSource::Listed(generation),
         }
     }
 
@@ -79,7 +91,13 @@ impl ComponentSet {
     pub(crate) fn statistics(
         &self,
     ) -> std::result::Result<Arc<SSTableStatistics>, MetadataFailure> {
-        self.generation.trusted_metadata()
+        match &self.stats {
+            StatsSource::Listed(generation) => generation.trusted_metadata(),
+            StatsSource::Direct(Some(path), _) => read_direct_trusted(path),
+            StatsSource::Direct(None, would_be) => Err(MetadataFailure::Absent {
+                path: would_be.clone(),
+            }),
+        }
     }
 }
 
@@ -141,9 +159,72 @@ pub(crate) fn resolve_exact(dir: &Path, data_path: &Path) -> Result<ComponentSet
     if let Some(orphan) = listing.orphans.iter().find(|g| is_it(g)) {
         return Err(refuse_orphan(orphan));
     }
-    Err(Error::not_found(format!(
-        "SSTable Data.db component {} is not a live generation of {}",
-        data_path.display(),
-        dir.display()
-    )))
+    resolve_noncanonical(dir, data_path, &listing)
+}
+
+/// The exact-path resolution for a path the listing does not return as a `Data.db` component
+/// (issue #1283): `SSTableReader::open` accepts such names (it simply skips siblings it cannot
+/// map), so a reader that opened must still get a verdict, never an error. The base name is the
+/// reader's own derivation, the siblings are the files that actually exist (taken from the
+/// module's listing, not a second scan), and `Statistics.db` is read through the module's trusted
+/// direct read. The version floor is applied from the parsed descriptor when the name has one;
+/// the format is the descriptor's when it parses and BIG otherwise, as the reader's own
+/// nb-compatible default (no format is inferred from anything else).
+fn resolve_noncanonical(dir: &Path, data_path: &Path, listing: &Listing) -> Result<ComponentSet> {
+    if !data_path.is_file() {
+        return Err(Error::not_found(format!(
+            "SSTable Data.db component not found at {}",
+            data_path.display()
+        )));
+    }
+    let data_name = data_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| Error::invalid_path("Data.db filename is not valid UTF-8"))?;
+    let descriptor = SsTableDescriptor::parse_filename(data_name).ok();
+    if let Some(d) = &descriptor {
+        if let Err(below) = check_floor(&d.version, d.format) {
+            return Err(Error::UnsupportedVersion {
+                version: below.version,
+                floor: below.floor.to_string(),
+            });
+        }
+    }
+    let base_name = data_name
+        .strip_suffix("-Data.db")
+        .map(str::to_string)
+        .or_else(|| extract_sstable_base_name(data_path))
+        .unwrap_or_else(|| {
+            data_name
+                .strip_suffix(".db")
+                .unwrap_or(data_name)
+                .to_string()
+        });
+    let prefix = format!("{base_name}-");
+    let mut present = BTreeMap::new();
+    let listed = listing
+        .live
+        .iter()
+        .chain(&listing.orphans)
+        .flat_map(|g| g.components().iter().map(|c| c.path.as_path()))
+        .chain(listing.ignored.iter().map(PathBuf::as_path));
+    for path in listed {
+        if let Some(component) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix(&prefix))
+        {
+            present.insert(component.to_string(), path.to_path_buf());
+        }
+    }
+    let stats_name = format!("{base_name}-Statistics.db");
+    let stats_path = present.get("Statistics.db").cloned();
+    Ok(ComponentSet {
+        toc_missing: !present.contains_key("TOC.txt"),
+        format: descriptor.map(|d| d.format).unwrap_or(SsTableFormat::Big),
+        base_name,
+        present,
+        data_path: data_path.to_path_buf(),
+        stats: StatsSource::Direct(stats_path, dir.join(stats_name)),
+    })
 }

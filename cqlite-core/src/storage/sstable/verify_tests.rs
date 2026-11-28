@@ -11,6 +11,7 @@
 //! private items unchanged.
 
 use super::*;
+use crate::storage::sstable::reader::extract_sstable_base_name;
 use crate::storage::sstable::verify_order::{
     classify_clustering_row_order, classify_order_and_ldt,
 };
@@ -618,6 +619,65 @@ fn listed_component_set(dir: &Path) -> ComponentSet {
         .next()
         .expect("one generation");
     ComponentSet::from_generation(generation)
+}
+
+// ---- Finding 1 (roborev round 2): tolerate reader filename shapes -------
+//
+// `SSTableReader::open` does not enforce a "-Data.db" suffix and still opens a
+// file whose name it cannot map (it just skips siblings). A reader that opened
+// MUST get an `IntegrityCheckResult` from `perform_integrity_check`, not an
+// `Err`, so exact-path resolution (`verify_resolve::resolve_exact`) must never
+// reject on the suffix, even though the generation module's listing does not
+// return such a name as a `Data.db` (issue #1283, restored for #4626).
+
+fn exact_set_for(name: &str) -> (tempfile::TempDir, PathBuf, ComponentSet) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = dir.path().join(name);
+    std::fs::write(&p, [1u8; 4]).expect("write");
+    let set = verify_resolve::resolve_exact(dir.path(), &p).expect("must resolve, not error");
+    (dir, p, set)
+}
+
+#[test]
+fn build_component_set_matches_reader_base_name_for_non_data_db_name() {
+    let (_dir, p, set) = exact_set_for("nb-7-big-Statistics.db");
+    assert_eq!(
+        Some(set.base_name),
+        extract_sstable_base_name(&p),
+        "verify base name must match SSTableReader::open's base-name derivation"
+    );
+}
+
+#[test]
+fn build_component_set_degrades_on_unmappable_name() {
+    let (_dir, p, set) = exact_set_for("weird.db");
+    assert_eq!(set.base_name, "weird");
+    assert_eq!(set.data_path, p);
+}
+
+#[test]
+fn build_component_set_standard_name_still_resolves_canonically() {
+    let (_dir, _p, set) = exact_set_for("nb-3-big-Data.db");
+    assert_eq!(set.base_name, "nb-3-big");
+}
+
+/// A noncanonical name is still floor-checked from its parsed descriptor, and its Statistics
+/// goes through the module's trusted direct read (a garbage file is `Corrupt`, never skipped).
+#[test]
+fn noncanonical_exact_path_keeps_the_floor_and_the_integrity_check() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let below = dir.path().join("ma-7-big-Statistics.db");
+    std::fs::write(&below, [1u8; 4]).expect("write");
+    assert!(matches!(
+        verify_resolve::resolve_exact(dir.path(), &below),
+        Err(Error::UnsupportedVersion { .. })
+    ));
+
+    let (_dir, _p, set) = exact_set_for("nb-7-big-Statistics.db");
+    assert!(matches!(
+        set.statistics(),
+        Err(crate::storage::sstable::generation::MetadataFailure::Corrupt { .. })
+    ));
 }
 
 // ---- Finding 2 (roborev round 2): relative Data.db path, empty parent ---

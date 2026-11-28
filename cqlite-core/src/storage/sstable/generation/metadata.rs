@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use super::model::{Condition, Generation};
-#[cfg(feature = "write-support")]
 use super::name::check_floor;
 use crate::error::{Error, Result};
 use crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback_detailed;
@@ -156,6 +155,29 @@ pub(crate) struct DirectStatistics {
 
 #[cfg(feature = "write-support")]
 pub(crate) fn read_direct(path: &Path) -> std::result::Result<DirectStatistics, MetadataFailure> {
+    let (bytes, gates, stats) = read_direct_parts(path)?;
+    Ok(DirectStatistics {
+        stats: Arc::new(stats),
+        repair: parse_repair_metadata(&bytes, gates.as_ref())
+            .map(Arc::new)
+            .map_err(|e| e.to_string()),
+        extras: parse_stats_extras(&bytes, gates.as_ref())
+            .map(Arc::new)
+            .map_err(|e| e.to_string()),
+    })
+}
+
+/// [`read_direct`] without the write-only extras: the trusted `SSTableStatistics` of one path
+/// (the verifier's exact-path resolution for a name the listing does not return).
+pub(crate) fn read_direct_trusted(
+    path: &Path,
+) -> std::result::Result<Arc<SSTableStatistics>, MetadataFailure> {
+    read_direct_parts(path).map(|(_, _, stats)| Arc::new(stats))
+}
+
+type DirectParts = (Vec<u8>, Option<VersionGates>, SSTableStatistics);
+
+fn read_direct_parts(path: &Path) -> std::result::Result<DirectParts, MetadataFailure> {
     // The format and version come from the FILE NAME's parsed descriptor, the parser the rest of
     // the module uses, never from the directory path. A name with no parseable descriptor has no
     // authoritative version, so it gets no gates and the parser's nb-compatible defaults (as
@@ -185,21 +207,14 @@ pub(crate) fn read_direct(path: &Path) -> std::result::Result<DirectStatistics, 
         }
     };
     let bytes = read_checked(path).map_err(|e| classify_read_error(path, e))?;
-    let corrupt = |e: Error| MetadataFailure::Corrupt {
-        path: path.to_path_buf(),
-        detail: e.to_string(),
-    };
     let (_, stats) =
-        parse_statistics_with_fallback_detailed(&bytes, gates.as_ref()).map_err(corrupt)?;
-    Ok(DirectStatistics {
-        stats: Arc::new(stats),
-        repair: parse_repair_metadata(&bytes, gates.as_ref())
-            .map(Arc::new)
-            .map_err(|e| e.to_string()),
-        extras: parse_stats_extras(&bytes, gates.as_ref())
-            .map(Arc::new)
-            .map_err(|e| e.to_string()),
-    })
+        parse_statistics_with_fallback_detailed(&bytes, gates.as_ref()).map_err(|e| {
+            MetadataFailure::Corrupt {
+                path: path.to_path_buf(),
+                detail: e.to_string(),
+            }
+        })?;
+    Ok((bytes, gates, stats))
 }
 
 /// The production read: bounded, then the strict integrity check.
