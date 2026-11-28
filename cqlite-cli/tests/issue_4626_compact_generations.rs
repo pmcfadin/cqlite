@@ -217,6 +217,15 @@ fn explicit_generation_onto_an_existing_name_is_refused() {
     );
     assert_eq!(before, content_signature(&root), "refusal wrote something");
 
+    // M2 (G6.2): `backups/` holds nb-3, so 3 is taken although the live directory has no nb-3.
+    let o = compact(&live, &root, &schema, &["--generation", "3"]);
+    assert!(
+        !o.status.success(),
+        "backups/ nb-3 must make id 3 unavailable"
+    );
+    assert!(stderr(&o).contains("nb-3-big"), "{}", stderr(&o));
+    assert_eq!(before, content_signature(&root), "refusal wrote something");
+
     let o = compact(&live, &root, &schema, &["--generation", "2147483648"]);
     assert!(!o.status.success());
     assert!(stderr(&o).contains("2147483648"), "{}", stderr(&o));

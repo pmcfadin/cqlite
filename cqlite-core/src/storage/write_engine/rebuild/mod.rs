@@ -37,13 +37,13 @@
 // exist in every `write-support` build; the rest of rebuild keeps the `not(tombstones)` gate its
 // declaration in `write_engine/mod.rs` used to impose on the whole module.
 mod atomic_file;
-pub mod no_clobber;
 #[cfg(not(feature = "tombstones"))]
 mod boundaries;
 #[cfg(not(feature = "tombstones"))]
 mod components;
 #[cfg(not(feature = "tombstones"))]
 mod decode;
+pub mod no_clobber;
 #[cfg(not(feature = "tombstones"))]
 mod partition_stats;
 // Issue #4529: crash-safe publication shared by rebuild and salvage.

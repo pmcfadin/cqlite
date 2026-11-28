@@ -232,7 +232,6 @@ async fn a_flush_past_the_int_limit_is_refused() {
     assert!(!dir.join("nb-2147483648-big-Data.db").exists());
 }
 
-
 /// B1: two engines opened on one directory both allocate the same id; each flush must publish a
 /// DISTINCT generation and neither may overwrite the other (real bytes compared). The old writers
 /// used `File::create`, so the second flush replaced `nb-1-big-*`.
@@ -309,7 +308,12 @@ fn engine_compaction_never_overwrites_an_id_taken_meanwhile() {
     assert_eq!(engine.generation(), 3, "the compaction output will be nb-3");
     engine.set_merge_policy(Box::new(stcs())).unwrap();
 
-    // Another writer publishes nb-3 before this engine's compaction publishes.
+    // Start the merge (output id 3 is now fixed), then let another writer publish nb-3 before this
+    // engine's compaction publishes. A zero budget stops after the first slice of work.
+    let first = engine
+        .maintenance_step(std::time::Duration::ZERO)
+        .expect("start merge");
+    assert!(first.pending_compaction, "the merge must still be running");
     copy_generation_as(
         &fixture_table("snap_backup_live_low", "snap_backup"),
         "nb-1-big",
@@ -351,7 +355,9 @@ fn engine_compaction_refuses_an_id_past_the_int_limit() {
     flush_row(&mut engine, 2); // nb-2147483647; the counter is now past the limit
     engine.set_merge_policy(Box::new(stcs())).unwrap();
     let before = content_signature(&dir);
-    let err = drain_compaction(&mut engine).expect_err("must refuse").to_string();
+    let err = drain_compaction(&mut engine)
+        .expect_err("must refuse")
+        .to_string();
     assert!(err.contains("2147483647"), "{err}");
     assert_eq!(before, content_signature(&dir), "refusal wrote something");
 }

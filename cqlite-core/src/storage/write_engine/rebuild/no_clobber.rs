@@ -23,6 +23,11 @@ pub fn is_collision(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::AlreadyExists
 }
 
+/// The numeric id token of `name` (`<version>-<id>-<format>-<component>`).
+pub fn id_of(name: &str) -> Option<u64> {
+    name.split('-').nth(1).and_then(|t| t.parse().ok())
+}
+
 /// `name` (`<version>-<old>-<format>-<component>`) with its id token replaced by `new`; `name`
 /// unchanged when its id token is not `old`.
 pub fn retarget_name(name: &str, old: u64, new: u64) -> String {
@@ -41,10 +46,7 @@ mod tests {
 
     #[test]
     fn retarget_replaces_only_the_id_token() {
-        assert_eq!(
-            retarget_name("nb-3-big-Data.db", 3, 9),
-            "nb-9-big-Data.db"
-        );
+        assert_eq!(retarget_name("nb-3-big-Data.db", 3, 9), "nb-9-big-Data.db");
         assert_eq!(retarget_name("nb-4-big-Data.db", 3, 9), "nb-4-big-Data.db");
         assert_eq!(retarget_name("TOC.txt", 3, 9), "TOC.txt");
     }

@@ -97,6 +97,8 @@ pub use wal::{RecoveryReport, WriteAheadLog};
 #[cfg(feature = "write-support")]
 mod compaction;
 #[cfg(feature = "write-support")]
+mod compaction_publish;
+#[cfg(feature = "write-support")]
 pub(crate) mod durability;
 #[cfg(feature = "write-support")]
 mod maintenance;
@@ -1324,9 +1326,17 @@ impl WriteEngine {
 
         // Create SSTable writer with hint for Bloom filter sizing
         let partition_count_hint = self.memtable.iter().count();
+        // #4623: write into a stage and publish with no-clobber semantics, so a second engine (or
+        // `cqlite compact`) that chose the same id can never be overwritten.
+        let table_dir = self
+            .config
+            .data_dir
+            .join(&self.config.schema.keyspace)
+            .join(&self.config.schema.table);
+        let stage = next_generation::begin_stage(&self.config.data_dir, &table_dir)?;
         let mut writer =
             crate::storage::sstable::writer::SSTableWriter::with_expected_partitions_and_registry(
-                self.config.data_dir.clone(),
+                stage.dir().to_path_buf(),
                 self.generation,
                 &self.config.schema,
                 partition_count_hint,
@@ -1358,8 +1368,12 @@ impl WriteEngine {
             writer.write_partition(decorated_key.clone(), mutations.to_vec())?;
         }
 
-        // Finalize SSTable
-        let info = writer.finish().await?;
+        // Finalize SSTable, then publish it under its final names.
+        let staged_info = writer.finish().await?;
+        let published = next_generation::publish_staged(stage, &table_dir, self.generation)?;
+        let info =
+            next_generation::relocate_info(staged_info, &table_dir, self.generation, published);
+        self.generation = published;
 
         tracing::info!(
             "SSTable flush complete: generation {}, {} partitions, {} bytes",

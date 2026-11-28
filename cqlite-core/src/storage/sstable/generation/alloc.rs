@@ -49,7 +49,8 @@ pub fn next_generation_id(table_dir: &Path) -> GenerationResult<GenerationId> {
 
 /// Refuse an explicitly requested sequence id that a writer cannot publish without overwriting
 /// (#4623): the id must be inside the Java `int` range (G7) and no descriptor in `table_dir`
-/// (Live, Orphan or hidden by a transaction log, any format, any version) may already use it.
+/// (Live, `backups/`, Orphan or hidden by a transaction log, any format, any version) may already
+/// use it, the same space `next_generation_id` allocates from (G6.2).
 ///
 /// A `table_dir` that does not exist yet has nothing to collide with. This is a preflight: it
 /// reads the directory and writes nothing.
@@ -62,7 +63,7 @@ pub fn ensure_sequence_id_free(table_dir: &Path, id: u64) -> GenerationResult<()
     if !table_dir.is_dir() {
         return Ok(());
     }
-    let listing = list_generations(table_dir, &Scope::Live, TocPolicy::Accept)?;
+    let listing = list_generations(table_dir, &Scope::LiveAndBackups, TocPolicy::Accept)?;
     let mut holders: Vec<String> = listing
         .live
         .iter()

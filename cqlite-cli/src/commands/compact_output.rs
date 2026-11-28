@@ -44,7 +44,10 @@ pub(crate) async fn compact_and_publish(
     cqlite_core::storage::write_engine::merge::CompactReport,
     std::path::PathBuf,
 )> {
-    use cqlite_core::storage::write_engine::rebuild::staged_publish::StagedPublish;
+    use cqlite_core::storage::write_engine::rebuild::no_clobber::MAX_PUBLISH_ATTEMPTS;
+    use cqlite_core::storage::write_engine::rebuild::staged_publish::{
+        LeftoverPolicy, StagedPublish,
+    };
 
     let dest_dir = args.output.join(&schema.keyspace).join(&schema.table);
     let generation = resolve_generation(&dest_dir, args.generation)?;
@@ -68,14 +71,39 @@ pub(crate) async fn compact_and_publish(
     )
     .await
     .with_context(|| "compaction failed")?;
-    stage
-        .publish()
+    // A default id may lose a race with another writer: re-allocate and retry. An explicit id is
+    // the operator's choice and is never silently changed.
+    let attempts = if args.generation.is_some() {
+        1
+    } else {
+        MAX_PUBLISH_ATTEMPTS
+    };
+    let published = stage
+        .publish_retargeting(
+            generation,
+            attempts,
+            &mut |taken| match next_generation_id(&dest_dir) {
+                Ok(GenerationId::Sequence(n)) if u64::from(n) > taken => Ok(u64::from(n)),
+                Ok(_) => Err(cqlite_core::Error::Storage(format!(
+                    "no id above {taken} is available in {}",
+                    dest_dir.display()
+                ))),
+                Err(e) => Err(cqlite_core::Error::Storage(e.to_string())),
+            },
+        )
         .with_context(|| format!("cannot publish compaction output to {}", dest_dir.display()))?;
     let output_path = report
         .output
         .data_path
         .file_name()
-        .map(|n| dest_dir.join(n))
+        .and_then(|n| n.to_str())
+        .map(|n| {
+            dest_dir.join(
+                cqlite_core::storage::write_engine::rebuild::no_clobber::retarget_name(
+                    n, generation, published,
+                ),
+            )
+        })
         .unwrap_or_else(|| report.output.data_path.clone());
     Ok((report, output_path))
 }

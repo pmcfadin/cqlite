@@ -77,6 +77,9 @@ pub fn find_leftover(root: &Path) -> Option<PathBuf> {
     dirs.iter().find_map(|d| find_leftover(d))
 }
 
+mod retarget;
+pub use retarget::LeftoverPolicy;
+
 /// A generation being written under a staging directory, awaiting [`publish`](Self::publish).
 #[derive(Debug)]
 pub struct StagedPublish {
@@ -96,6 +99,14 @@ pub struct StagedPublish {
     /// The nearest ancestor of `root` that existed before [`begin`](StagedPublish::begin) created it
     /// (`Some` only when `root` was created): the top of the directory chain that must be fsynced.
     anchor: Option<PathBuf>,
+    /// The directory the stage lives in (`root` for [`begin`](StagedPublish::begin); the table
+    /// directory for [`begin_in`](StagedPublish::begin_in)).
+    stage_parent: PathBuf,
+    /// `(from, to)`: final names carry id `to` where the staged names carry `from` (a re-allocation
+    /// after losing a race for an id; see `retarget`).
+    renumber: Option<(u64, u64)>,
+    /// Set when `publish` stopped because a final name already existed (nothing of ours left behind).
+    collided: Option<PathBuf>,
 }
 
 /// A filesystem operation of the publish window, reported to a test observer.
@@ -142,6 +153,9 @@ impl StagedPublish {
             published: false,
             publication_started: false,
             anchor,
+            stage_parent: root.to_path_buf(),
+            renumber: None,
+            collided: None,
         })
     }
 
@@ -173,8 +187,9 @@ impl StagedPublish {
         staged.sort_by(|a, b| rank(&a.1).cmp(&rank(&b.1)).then_with(|| a.1.cmp(&b.1)));
         // Pre-flight: a collision refuses with nothing renamed (the stage is removed by `Drop`).
         for (_, rel) in &staged {
-            let dest = self.root.join(rel);
+            let dest = self.dest_of(rel);
             if dest.symlink_metadata().is_ok() {
+                self.collided = Some(dest.clone());
                 return Err(Error::Storage(format!(
                     "refusing to publish over an existing {}",
                     dest.display()
@@ -193,7 +208,7 @@ impl StagedPublish {
         let floor: &Path = self.anchor.as_deref().unwrap_or(&self.root);
         let mut sync_dirs: Vec<PathBuf> = Vec::new();
         for (_, rel) in &staged {
-            if let Some(parent) = self.root.join(rel).parent() {
+            if let Some(parent) = self.dest_of(rel).parent() {
                 std::fs::create_dir_all(parent)?;
                 for anc in dir_chain(parent, floor) {
                     if !sync_dirs.contains(&anc) {
@@ -215,26 +230,44 @@ impl StagedPublish {
         // renames while the `.cqlite-publish-*.tmp` entry is lost, leaving an unidentifiable
         // final-named partial set (#4529, AC2).
         let mut stage_durable = vec![self.stage.clone()];
-        stage_durable.extend(dir_chain(&self.root, floor));
+        stage_durable.extend(dir_chain(&self.stage_parent, floor));
         sync_all_dirs(&stage_durable, obs)?;
+        // Link each staged file to its final name WITHOUT replacing anything (#4623): a lost race for
+        // the name rolls back only the names this run linked.
+        let mut linked: Vec<PathBuf> = Vec::new();
         for (renamed, (file, rel)) in staged.iter().enumerate() {
             if renamed == split {
-                // Barrier: every non-Data.db rename is durable before Data.db can appear.
+                // Barrier: every non-Data.db link is durable before Data.db can appear.
                 sync_all_dirs(&sync_dirs, obs)?;
             }
             test_abort_before_rename(renamed);
-            let dest = self.root.join(rel);
+            let dest = self.dest_of(rel);
             obs(&Op::Rename(dest.clone()))?;
-            std::fs::rename(file, &dest).map_err(|e| {
-                Error::Storage(format!(
+            if let Err(e) = super::no_clobber::link_no_clobber(file, &dest) {
+                if super::no_clobber::is_collision(&e) {
+                    for done in &linked {
+                        let _ = std::fs::remove_file(done);
+                    }
+                    self.publication_started = false;
+                    self.collided = Some(dest.clone());
+                    return Err(Error::Storage(format!(
+                        "refusing to publish over an existing {}",
+                        dest.display()
+                    )));
+                }
+                return Err(Error::Storage(format!(
                     "failed to publish {} -> {}: {e}",
                     file.display(),
                     dest.display()
-                ))
-            })?;
+                )));
+            }
+            linked.push(dest);
         }
         test_abort_before_rename(staged.len());
         sync_all_dirs(&sync_dirs, obs)?;
+        for (file, _) in &staged {
+            std::fs::remove_file(file)?; // the stage's copy; the final name is a second link
+        }
         remove_stage_tree(&self.stage)?;
         self.published = true;
         obs(&Op::SyncDir(self.root.clone()))?;
@@ -258,6 +291,12 @@ impl Drop for StagedPublish {
             return;
         }
         let _ = std::fs::remove_dir_all(&self.stage);
+        for dir in self.stage_parent.ancestors() {
+            if !self.created_root || !dir.starts_with(&self.root) {
+                break;
+            }
+            let _ = std::fs::remove_dir(dir); // only if empty
+        }
         if self.created_root {
             let _ = std::fs::remove_dir(&self.root); // only if empty (i.e. nothing was published)
         }
