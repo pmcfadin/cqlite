@@ -256,9 +256,7 @@ pub fn compute_max_purgeable_timestamp(outside_paths: &[PathBuf]) -> Option<i64>
 /// [`compute_max_purgeable_timestamp`] over outside SSTables already resolved to generations (G11).
 #[cfg(feature = "write-support")]
 pub(crate) fn compute_max_purgeable_timestamp_in(outside: &InputStats) -> Option<i64> {
-    if outside.iter().next().is_none() {
-        return None;
-    }
+    outside.iter().next()?;
     let mut min_ts = i64::MAX;
     for input in outside.iter() {
         // Any outside SSTable we cannot read/parse leaves the bound UNKNOWN: we

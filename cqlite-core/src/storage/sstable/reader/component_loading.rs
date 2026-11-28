@@ -274,11 +274,11 @@ impl SSTableReader {
         let statistics_path = parent.join(format!("{}-Statistics.db", base_name));
         // The caller already holds this generation's trusted metadata (G11): no second read.
         if let Some(statistics) = trusted {
-            return Ok(Some(StatisticsReader::from_trusted(
-                &statistics_path,
-                (*statistics).clone(),
-                platform.clone(),
-            )));
+            return Ok(Some(StatisticsReader {
+                file_path: statistics_path,
+                statistics: (*statistics).clone(),
+                platform: platform.clone(),
+            }));
         }
 
         match StatisticsReader::open(&statistics_path, platform.clone()).await {

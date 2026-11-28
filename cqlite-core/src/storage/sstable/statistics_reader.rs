@@ -17,12 +17,12 @@ pub mod integrity; // strict TOC/CRC layout check, shared by every reader (#4612
 /// High-level Statistics.db file reader
 pub struct StatisticsReader {
     /// Path to the Statistics.db file
-    file_path: PathBuf,
+    pub(crate) file_path: PathBuf,
     /// Parsed statistics data
-    statistics: SSTableStatistics,
+    pub(crate) statistics: SSTableStatistics,
     /// Platform abstraction for file operations
     #[allow(dead_code)]
-    platform: Arc<Platform>,
+    pub(crate) platform: Arc<Platform>,
 }
 
 impl StatisticsReader {
@@ -92,20 +92,6 @@ impl StatisticsReader {
             statistics,
             platform,
         })
-    }
-
-    /// A reader over statistics the generation module's accessor already read, checked and
-    /// parsed (G11); it opens no file.
-    pub(crate) fn from_trusted(
-        path: &Path,
-        statistics: SSTableStatistics,
-        platform: Arc<Platform>,
-    ) -> Self {
-        Self {
-            file_path: path.to_path_buf(),
-            statistics,
-            platform,
-        }
     }
 
     /// Get the raw statistics data

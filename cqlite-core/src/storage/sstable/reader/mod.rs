@@ -154,7 +154,6 @@ use crate::{
     Config, Error, Result, RowKey, ScanRow, Value,
 };
 
-// Structured logging
 use tracing::debug;
 
 #[cfg(feature = "tombstones")]
