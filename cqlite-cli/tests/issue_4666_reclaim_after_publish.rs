@@ -238,6 +238,12 @@ fn out_published(out: &Path) -> Vec<PathBuf> {
     rd.flatten()
         .map(|e| e.path())
         .filter(|p| p.to_string_lossy().ends_with("-big-Data.db"))
+        // Published means TOC.txt is present too: TOC is linked LAST, so a Data.db without its
+        // TOC is a partial, unpublished generation and must not count.
+        .filter(|p| {
+            let s = p.to_string_lossy();
+            std::path::Path::new(&format!("{}TOC.txt", &s[..s.len() - "Data.db".len()])).exists()
+        })
         .collect()
 }
 
