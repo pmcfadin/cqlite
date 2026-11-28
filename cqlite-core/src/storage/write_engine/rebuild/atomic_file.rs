@@ -126,20 +126,38 @@ pub fn write_file_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
     write_file_atomic_with(dest, |w| w.write_all(bytes))
 }
 
-/// fsync a directory so its entries are durable. Unix only; on other platforms a documented no-op
-/// (std cannot open a directory there, and Rust's own std makes the same choice).
+/// fsync a directory so its entries are durable. Unix: `open` + `fsync`. Windows: open the
+/// directory with `FILE_FLAG_BACKUP_SEMANTICS` and `FlushFileBuffers` (`sync_all`), which needs
+/// GENERIC_WRITE. Any other platform returns an error so a caller that deletes data afterwards
+/// refuses instead of proceeding without durability.
 pub fn fsync_dir(dir: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        std::fs::File::open(dir)
-            .and_then(|d| d.sync_all())
-            .map_err(|e| {
-                Error::Storage(format!("failed to fsync directory {}: {e}", dir.display()))
-            })?;
-    }
-    #[cfg(not(unix))]
-    let _ = dir;
-    Ok(())
+    fsync_dir_impl(dir)
+        .map_err(|e| Error::Storage(format!("failed to fsync directory {}: {e}", dir.display())))
+}
+
+#[cfg(unix)]
+fn fsync_dir_impl(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(windows)]
+fn fsync_dir_impl(dir: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)?
+        .sync_all()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn fsync_dir_impl(_dir: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "directory fsync is not supported on this platform",
+    ))
 }
 
 #[cfg(test)]

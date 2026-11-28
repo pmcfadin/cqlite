@@ -5,29 +5,40 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use cqlite_core::storage::write_engine::merge::CompactReport;
 
+/// The first ancestor of `output` (itself included) that already exists, recorded BEFORE the
+/// compaction creates `<output>/<keyspace>/<table>` (and any missing levels of `output`).
+pub(crate) fn existing_anchor(output: &Path) -> PathBuf {
+    let anchor = output
+        .ancestors()
+        .find(|a| a.as_os_str().is_empty() || a.exists())
+        .unwrap_or_else(|| Path::new("."));
+    if anchor.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        anchor.to_path_buf()
+    }
+}
+
 /// Every directory whose entry must be durable for `table_dir` to survive a power loss: the table
-/// dir, each ancestor up to and including `output_root` (compact creates `<out>/<ks>/<table>`),
-/// and `output_root`'s parent (in case `output_root` itself was just created). Bottom-up.
-fn durability_dirs(table_dir: &Path, output_root: &Path) -> Vec<PathBuf> {
+/// dir and each ancestor up to and including `anchor` (the first directory that existed before the
+/// compaction). Bottom-up.
+fn durability_dirs(table_dir: &Path, anchor: &Path) -> Vec<PathBuf> {
+    let anchor_norm = |p: &Path| {
+        if p.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            p.to_path_buf()
+        }
+    };
     let mut dirs: Vec<PathBuf> = Vec::new();
     for d in table_dir.ancestors() {
-        dirs.push(d.to_path_buf());
-        if d == output_root {
-            break;
+        dirs.push(anchor_norm(d));
+        if anchor_norm(d) == anchor_norm(anchor) {
+            return dirs;
         }
     }
-    if !dirs.iter().any(|d| d == output_root) {
-        // `table_dir` is not under `output_root` (should not happen): sync the root regardless.
-        dirs.push(output_root.to_path_buf());
-    }
-    if let Some(parent) = output_root.parent() {
-        dirs.push(parent.to_path_buf());
-    }
-    for d in &mut dirs {
-        if d.as_os_str().is_empty() {
-            *d = PathBuf::from(".");
-        }
-    }
+    // `table_dir` is not under `anchor` (should not happen): sync the anchor regardless.
+    dirs.push(anchor_norm(anchor));
     dirs
 }
 
@@ -41,9 +52,9 @@ fn sync_dirs(dirs: &[PathBuf], fsync: &mut dyn FnMut(&Path) -> Result<()>) -> Re
 /// The output (TOC.txt last, every file fsynced by `SSTableWriter::finish`) is durable only once
 /// every directory entry on its path is too. Only then may a fully-expired input be removed.
 /// `fsync_dir` is platform-aware (a documented no-op off unix).
-pub(crate) fn reclaim_after_durable(report: &CompactReport, output_root: &Path) -> Result<()> {
+pub(crate) fn reclaim_after_durable(report: &CompactReport, anchor: &Path) -> Result<()> {
     if let Some(table_dir) = report.output.data_path.parent() {
-        let dirs = durability_dirs(table_dir, output_root);
+        let dirs = durability_dirs(table_dir, anchor);
         sync_dirs(&dirs, &mut |d| {
             cqlite_core::storage::write_engine::rebuild::fsync_dir(d).map_err(Into::into)
         })?;
@@ -70,18 +81,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn syncs_table_keyspace_output_and_output_parent_bottom_up() {
-        let dirs = durability_dirs(Path::new("/w/out/ks/tbl"), Path::new("/w/out"));
-        let want: Vec<PathBuf> = ["/w/out/ks/tbl", "/w/out/ks", "/w/out", "/w"]
-            .iter()
-            .map(PathBuf::from)
-            .collect();
+    fn nested_new_output_syncs_every_created_level_and_the_existing_anchor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("new/a/out");
+        let anchor = existing_anchor(&out);
+        assert_eq!(anchor, tmp.path());
+        let table = out.join("ks/tbl");
+        let dirs = durability_dirs(&table, &anchor);
+        let want: Vec<PathBuf> = [
+            table.clone(),
+            out.join("ks"),
+            out.clone(),
+            tmp.path().join("new/a"),
+            tmp.path().join("new"),
+            tmp.path().to_path_buf(),
+        ]
+        .into();
         assert_eq!(dirs, want);
     }
 
     #[test]
-    fn relative_output_root_syncs_dot_not_empty_path() {
-        let dirs = durability_dirs(Path::new("out/ks/tbl"), Path::new("out"));
+    fn existing_output_anchors_at_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(existing_anchor(tmp.path()), tmp.path());
+        let dirs = durability_dirs(&tmp.path().join("ks/tbl"), tmp.path());
+        assert_eq!(dirs.len(), 3);
+        assert_eq!(dirs[2], tmp.path());
+    }
+
+    #[test]
+    fn relative_output_syncs_dot_not_empty_path() {
+        assert_eq!(existing_anchor(Path::new("zz-no-such-out")), Path::new("."));
+        let dirs = durability_dirs(Path::new("zz-no-such-out/ks/tbl"), Path::new("."));
         assert_eq!(dirs.last(), Some(&PathBuf::from(".")));
         assert!(dirs.iter().all(|d| !d.as_os_str().is_empty()));
     }
