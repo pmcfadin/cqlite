@@ -91,7 +91,10 @@ async fn gd1_1_below_floor_generation_is_refused_before_any_open() {
         }
         other => panic!("expected UnsupportedVersion, got {other:?}"),
     }
-    assert!(!out.exists(), "a refusal must write nothing, not even --out");
+    assert!(
+        !out.exists(),
+        "a refusal must write nothing, not even --out"
+    );
 }
 
 /// GD2.1: a committed `test_basic` generation with `TOC.txt` deleted is rebuilt; the report names
@@ -262,7 +265,10 @@ async fn gd3_1_corrupt_statistics_still_fails_closed_naming_both_remedies() {
     .expect_err("a damaged sibling fails closed")
     .to_string();
     assert!(err.contains(&format!("{base}-Statistics.db")), "{err}");
-    assert!(err.contains("rename the damaged Statistics.db aside"), "{err}");
+    assert!(
+        err.contains("rename the damaged Statistics.db aside"),
+        "{err}"
+    );
     assert!(err.contains("statistics_recovery_source"), "{err}");
     assert!(!out.exists());
 }

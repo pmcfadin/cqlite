@@ -244,7 +244,11 @@ fn gd2_3_txn_inconsistent_directory_is_refused_naming_the_log() {
     let m = root.path().join("m.json");
     let o = rebuild(&schema, &dir, &out, &m, "digest");
     assert_eq!(o.status.code(), Some(1), "{}", err_text(&o));
-    assert!(err_text(&o).contains("nb_txn_compaction_"), "{}", err_text(&o));
+    assert!(
+        err_text(&o).contains("nb_txn_compaction_"),
+        "{}",
+        err_text(&o)
+    );
     assert!(!out.exists());
 }
 
@@ -291,7 +295,9 @@ fn salvage(schema: &Path, input: &Path, out: &Path) -> Output {
 fn salvage_manifest(o: &Output) -> Vec<Value> {
     let v: Value = serde_json::from_str(&out_text(o))
         .unwrap_or_else(|e| panic!("stdout is not JSON: {e}\n{}\n{}", out_text(o), err_text(o)));
-    v.as_array().expect("table-dir manifest is an array").clone()
+    v.as_array()
+        .expect("table-dir manifest is an array")
+        .clone()
 }
 
 fn finding_classes(entry: &Value) -> Vec<String> {
@@ -415,7 +421,10 @@ fn gd10_below_floor_generation_is_refused_and_not_read() {
     let o = salvage(&schema, &dir, &out);
     assert_eq!(o.status.code(), Some(3), "{}", err_text(&o));
     let err = err_text(&o);
-    assert!(err.contains("ma-1-big") && err.contains("UnsupportedVersion"), "{err}");
+    assert!(
+        err.contains("ma-1-big") && err.contains("UnsupportedVersion"),
+        "{err}"
+    );
     let entries = salvage_manifest(&o);
     assert_eq!(entries.len(), 1, "{entries:?}");
     assert!(finding_classes(&entries[0]).contains(&"SkippedInputGeneration".to_string()));
@@ -448,6 +457,10 @@ fn gd10_txn_inconsistent_directory_is_refused_naming_the_log() {
     let out = root.path().join("out");
     let o = salvage(&schema, &dir, &out);
     assert_eq!(o.status.code(), Some(1), "{}", err_text(&o));
-    assert!(err_text(&o).contains("nb_txn_compaction_"), "{}", err_text(&o));
+    assert!(
+        err_text(&o).contains("nb_txn_compaction_"),
+        "{}",
+        err_text(&o)
+    );
     assert!(!has_data_db(&out));
 }

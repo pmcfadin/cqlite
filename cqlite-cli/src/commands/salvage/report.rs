@@ -171,13 +171,12 @@ pub(super) fn record_unpublished_input_findings(
         first.component_findings.push(ComponentFinding {
             class: "UnpublishedInputGeneration".to_string(),
             component: path.display().to_string(),
-            detail:
-                "this generation is TocMissing: it has no sibling -TOC.txt (the publication \
+            detail: "this generation is TocMissing: it has no sibling -TOC.txt (the publication \
                  barrier), so salvage cannot know it was ever COMPLETELY written — it was \
                  salvaged anyway (the generation listing accepts a TocMissing generation, and an \
                  explicitly named file overrides the barrier), and the recovered output may \
                  therefore come from an unpublished, partially-flushed generation"
-                    .to_string(),
+                .to_string(),
         });
     }
 }

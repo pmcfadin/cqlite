@@ -115,11 +115,16 @@ pub(super) fn discover_salvage_inputs(input: &Path) -> anyhow::Result<SalvageDis
         });
     }
     for path in &listing.ignored {
-        let named = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let named = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
         if path.is_file() && named.ends_with("-Data.db") {
             skipped.push(SkippedInput {
                 path: path.clone(),
-                reason: format!("'{named}' is not an SSTable component name (the listing ignores it)"),
+                reason: format!(
+                    "'{named}' is not an SSTable component name (the listing ignores it)"
+                ),
             });
         }
     }
@@ -312,7 +317,11 @@ mod tests {
         std::fs::write(temp.path().join("nb-3-big-Data.db"), b"").expect("write orphan");
 
         let discovery = discover_salvage_inputs(temp.path()).expect("discovery must succeed");
-        assert_eq!(discovery.generations.len(), 2, "nb-1 and the TocMissing nb-2");
+        assert_eq!(
+            discovery.generations.len(),
+            2,
+            "nb-1 and the TocMissing nb-2"
+        );
         assert_eq!(discovery.barrier_absent.len(), 1);
         assert!(discovery.barrier_absent[0].ends_with("nb-2-big-Data.db"));
         assert_eq!(discovery.skipped.len(), 1);
@@ -335,7 +344,12 @@ mod tests {
         let names: Vec<String> = discovery
             .generations
             .iter()
-            .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
             .collect();
         assert_eq!(
             names,

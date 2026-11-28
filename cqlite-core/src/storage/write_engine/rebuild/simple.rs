@@ -141,10 +141,9 @@ mod tests {
         std::fs::write(dir.join("nb-1-big-Statistics.db"), b"stats").unwrap();
         std::fs::write(dir.join("nb-1-big-TOC.txt"), b"Data.db\n").unwrap();
 
-        let present = copy_untouched_components(&listed(&dir), &out, |c| {
-            c == SSTableComponent::Statistics
-        })
-        .unwrap();
+        let present =
+            copy_untouched_components(&listed(&dir), &out, |c| c == SSTableComponent::Statistics)
+                .unwrap();
 
         assert!(out.join("nb-1-big-Data.db").exists());
         assert!(
@@ -171,10 +170,8 @@ mod tests {
         std::fs::write(dir.join("nb-1-big-Data.db"), b"data").unwrap();
         std::fs::write(dir.join("nb-1-big-TOC.txt"), b"Data.db\n").unwrap();
 
-        let present = copy_untouched_components(&listed(&dir), &out, |c| {
-            c == SSTableComponent::TOC
-        })
-        .unwrap();
+        let present =
+            copy_untouched_components(&listed(&dir), &out, |c| c == SSTableComponent::TOC).unwrap();
 
         assert!(
             !out.join("nb-1-big-TOC.txt").exists(),
