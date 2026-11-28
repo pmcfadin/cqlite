@@ -330,7 +330,7 @@ mod tests {
     }
 
     /// The listing's order is the comparator's (numeric, never lexicographic), whatever order the
-    /// entries were created in, with a tie between formats broken by name.
+    /// entries were created in, with a tie between formats broken by format name.
     #[test]
     fn generations_come_back_in_the_modules_order() {
         let temp = TempDir::new().expect("tempdir");
@@ -354,8 +354,10 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "da-1-bti-Data.db",
+                // A tie on the id is broken by format name (`big` before `bti`), the module's
+                // deterministic rule; the old scan broke it by path (`da-` before `nb-`).
                 "nb-1-big-Data.db",
+                "da-1-bti-Data.db",
                 "nb-2-big-Data.db",
                 "da-10-bti-Data.db",
             ]
