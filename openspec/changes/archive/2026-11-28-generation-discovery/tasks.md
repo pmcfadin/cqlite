@@ -31,7 +31,7 @@ exercises. Commit after each unit (#3042). Each migration PR deletes the copy it
       (G6, G7). Surface: allocation tests on BIG/BTI/UUID corpora.
 - [x] 1.9 Generate a UUID-id dataset on the local Cassandra 5.0.8 VM (`incus` `wintermute:` remote, see
       `/usr/local/share/wintermute/native-servers.md`) with `uuid_sstable_identifiers_enabled: true`; commit the
-      fixtures and update `test-data/cassandra-parity-manifest.yml` and the dataset bundle notes. Surface:
+      fixtures and update `test-data/cassandra-parity-manifest.yml` (NOT done at archive: tracked in #4682) and the dataset bundle notes. Surface:
       G5.1 over real Cassandra-written bytes.
 - [x] 1.10 Generate transaction-log fixtures: a committed compaction (`nb_txn_compaction_<uuid>.log` with
       obsolete inputs still on disk), an in-progress one, and an inconsistent one (old files removed, log
