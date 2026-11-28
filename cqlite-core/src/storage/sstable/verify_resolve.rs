@@ -22,7 +22,7 @@ use crate::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
 use crate::{Error, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 const DATA_COMPONENT: &str = "Data.db";
 
@@ -40,12 +40,14 @@ pub(crate) struct ComponentSet {
 }
 
 /// Where the trusted `Statistics.db` comes from.
+type StatsCell = OnceLock<std::result::Result<Arc<SSTableStatistics>, MetadataFailure>>;
+
 enum StatsSource {
     /// A listed generation: the module's cached accessor.
     Listed(Generation),
     /// An exact path the listing does not return as a `Data.db` (see [`resolve_exact`]): the
     /// module's trusted direct read of this sibling, or none if the sibling is absent.
-    Direct(Option<PathBuf>, PathBuf),
+    Direct(Option<PathBuf>, PathBuf, StatsCell),
 }
 
 impl ComponentSet {
@@ -93,10 +95,16 @@ impl ComponentSet {
     ) -> std::result::Result<Arc<SSTableStatistics>, MetadataFailure> {
         match &self.stats {
             StatsSource::Listed(generation) => generation.trusted_metadata(),
-            StatsSource::Direct(Some(path), _) => read_direct_trusted(path),
-            StatsSource::Direct(None, would_be) => Err(MetadataFailure::Absent {
-                path: would_be.clone(),
-            }),
+            // Read once per resolution, like the listed generation's cache: every caller (the
+            // Statistics check and the audit row) sees the same value or the same failure.
+            StatsSource::Direct(path, would_be, cell) => cell
+                .get_or_init(|| match path {
+                    Some(path) => read_direct_trusted(path),
+                    None => Err(MetadataFailure::Absent {
+                        path: would_be.clone(),
+                    }),
+                })
+                .clone(),
         }
     }
 }
@@ -225,6 +233,6 @@ fn resolve_noncanonical(dir: &Path, data_path: &Path, listing: &Listing) -> Resu
         base_name,
         present,
         data_path: data_path.to_path_buf(),
-        stats: StatsSource::Direct(stats_path, dir.join(stats_name)),
+        stats: StatsSource::Direct(stats_path, dir.join(stats_name), OnceLock::new()),
     })
 }

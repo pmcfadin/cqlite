@@ -17,6 +17,7 @@ use cqlite_core::storage::sstable::verify::{
 };
 use cqlite_core::{Config, Error};
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -158,7 +159,9 @@ async fn verdicts_equal_the_pre_migration_capture() {
     );
 }
 
-/// GD11.2: below-floor is a refusal naming the floor and opening no component.
+/// GD11.2: below-floor is a refusal naming the floor and opening no component. (Unix only: the
+/// proof is mode-000 components.)
+#[cfg(unix)]
 #[tokio::test]
 async fn below_floor_generation_is_refused_without_opening_a_component() {
     let tmp = tempfile::tempdir().expect("tempdir");

@@ -680,6 +680,52 @@ fn noncanonical_exact_path_keeps_the_floor_and_the_integrity_check() {
     ));
 }
 
+/// The exact-path (direct) Statistics read happens once per resolution: both callers (the
+/// Statistics check and the audit input) get the SAME `Arc`, so they cannot disagree.
+#[test]
+fn direct_statistics_are_read_once_per_resolution() {
+    let root = std::env::var("CQLITE_DATASETS_ROOT")
+        .ok()
+        .map(PathBuf::from);
+    let src = root.as_ref().and_then(|r| {
+        let ks = r.join("sstables/test_comp");
+        std::fs::read_dir(ks)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("lz4_table"))
+            })
+    });
+    let stats = src.and_then(|d| {
+        std::fs::read_dir(d)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().ends_with("-Statistics.db"))
+            })
+    });
+    let Some(stats) = stats else {
+        assert!(
+            std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref() != Ok("1"),
+            "lz4_table Statistics.db fixture absent under CQLITE_REQUIRE_FIXTURES=1"
+        );
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = dir.path().join("nb-7-big-Statistics.db");
+    std::fs::copy(&stats, &p).expect("copy");
+    let set = verify_resolve::resolve_exact(dir.path(), &p).expect("resolves");
+    let first = set.statistics().expect("fixture Statistics.db is trusted");
+    // Remove the file: a second READ would now fail, a cached value is returned unchanged.
+    std::fs::remove_file(&p).expect("remove");
+    let second = set.statistics().expect("cached, not re-read");
+    assert!(Arc::ptr_eq(&first, &second));
+}
+
 // ---- Finding 2 (roborev round 2): relative Data.db path, empty parent ---
 //
 // A relative, directory-less filename yields an EMPTY parent from

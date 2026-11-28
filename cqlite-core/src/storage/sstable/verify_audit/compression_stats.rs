@@ -172,6 +172,10 @@ pub(super) fn check_statistics_vs_scan(
     if !deep {
         return skip("requires --deep");
     }
+    // An absent Statistics.db is an unmeasured row whatever the scan did (pre-migration order).
+    if matches!(statistics, Err(MetadataFailure::Absent { .. })) {
+        return skip("no Statistics.db");
+    }
     let observed = match observed {
         Some(Ok(n)) => *n as u64,
         // The scan failed: the failure itself is the finding `run_audit` pushed
@@ -182,7 +186,6 @@ pub(super) fn check_statistics_vs_scan(
     };
     let declared = match statistics {
         Ok(stats) => stats.row_stats.partition_count,
-        Err(MetadataFailure::Absent { .. }) => return skip("no Statistics.db"),
         Err(e) => return skip(format!("Statistics.db unreadable: {e}")),
     };
     if declared == 0 {
@@ -199,4 +202,23 @@ pub(super) fn check_statistics_vs_scan(
         ),
     ));
     AuditVerdict::Fail
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A8 with no `Statistics.db` and a failing scan is skipped, as before the #4626 migration
+    /// (it must not read as a failed comparison).
+    #[test]
+    fn absent_statistics_with_a_failing_scan_is_skipped() {
+        let absent = Err(MetadataFailure::Absent {
+            path: "nb-1-big-Statistics.db".into(),
+        });
+        let failed_scan: Result<usize, String> = Err("scan failed".into());
+        let mut findings = Vec::new();
+        let verdict = check_statistics_vs_scan(&absent, true, Some(&failed_scan), &mut findings);
+        assert!(matches!(verdict, AuditVerdict::Skip(_)), "{verdict:?}");
+        assert!(findings.is_empty());
+    }
 }
