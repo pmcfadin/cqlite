@@ -106,6 +106,30 @@ impl SSTableReader {
             cache,
             cancel,
             OpenErrorReporting::SelfReported,
+            None,
+        )
+        .await
+    }
+
+    /// [`open`](Self::open) with the generation's already-trusted `Statistics.db` supplied, so the
+    /// open does not read the file a second time (G11, GD9.1: one read per generation per run).
+    /// `statistics` must come from the generation module's accessor for this same `Data.db`.
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+    pub(crate) async fn open_with_trusted_statistics(
+        path: &Path,
+        config: &Config,
+        platform: Arc<Platform>,
+        statistics: Arc<crate::parser::statistics::SSTableStatistics>,
+    ) -> Result<Self> {
+        let cache = super::super::build_chunk_cache(config);
+        Self::open_instrumented(
+            path,
+            config,
+            platform,
+            cache,
+            crate::storage::scan_cancel::ScanCancel::default(),
+            OpenErrorReporting::SelfReported,
+            Some(statistics),
         )
         .await
     }
@@ -147,6 +171,7 @@ impl SSTableReader {
             cache,
             crate::storage::scan_cancel::ScanCancel::default(),
             reporting,
+            None,
         )
         .await
     }
@@ -160,6 +185,7 @@ impl SSTableReader {
         cache: Arc<crate::storage::cache::DecompressedChunkCache>,
         cancel: crate::storage::scan_cancel::ScanCancel,
         reporting: OpenErrorReporting,
+        trusted_statistics: Option<Arc<crate::parser::statistics::SSTableStatistics>>,
     ) -> Result<Self> {
         use crate::observability::{self as obs, catalog};
         use tracing::Instrument as _;
@@ -174,7 +200,7 @@ impl SSTableReader {
         // `.await`: entering a span guard and then awaiting can attach unrelated
         // async work scheduled on this task to the span. `Instrument` enters the
         // span only while this specific future is polled.
-        let result = Self::open_inner(path, config, platform, cache, cancel)
+        let result = Self::open_inner(path, config, platform, cache, cancel, trusted_statistics)
             .instrument(span.clone())
             .await;
         match &result {

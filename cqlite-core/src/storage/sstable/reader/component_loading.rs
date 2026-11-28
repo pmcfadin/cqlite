@@ -263,6 +263,7 @@ impl SSTableReader {
     pub(super) async fn load_statistics_reader(
         path: &Path,
         platform: &Arc<Platform>,
+        trusted: Option<Arc<crate::parser::statistics::SSTableStatistics>>,
     ) -> Result<Option<StatisticsReader>> {
         let Some(base_name) = extract_sstable_base_name(path) else {
             return Ok(None);
@@ -271,6 +272,14 @@ impl SSTableReader {
             return Ok(None);
         };
         let statistics_path = parent.join(format!("{}-Statistics.db", base_name));
+        // The caller already holds this generation's trusted metadata (G11): no second read.
+        if let Some(statistics) = trusted {
+            return Ok(Some(StatisticsReader::from_trusted(
+                &statistics_path,
+                (*statistics).clone(),
+                platform.clone(),
+            )));
+        }
 
         match StatisticsReader::open(&statistics_path, platform.clone()).await {
             Ok(reader) => {

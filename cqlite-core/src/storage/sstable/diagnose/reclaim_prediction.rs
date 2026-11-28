@@ -25,9 +25,10 @@
 use std::path::PathBuf;
 
 use crate::schema::TableSchema;
+use crate::storage::sstable::generation::Generation;
 use crate::storage::write_engine::merge::{
-    apply_udt_marshals_from_inputs, effective_compaction_schema, fully_expired_sstables,
-    split_merge_and_dropped, KWayMerger, MergeStep,
+    apply_udt_marshals_from_inputs_in, effective_compaction_schema_in, fully_expired_sstables_in,
+    split_merge_and_dropped, InputStats, KWayMerger, MergeStep,
 };
 use crate::Result;
 
@@ -49,6 +50,9 @@ pub struct ReclaimPrediction {
 pub(crate) struct ReclaimInput {
     pub data_path: PathBuf,
     pub generation: String,
+    /// The generation the run already holds, whose cached metadata the dry compaction reuses
+    /// (G11, GD9.1).
+    pub resolved: Generation,
     /// Rows `--deep` streamed from this generation (unpurged).
     pub rows_scanned: u64,
 }
@@ -71,16 +75,23 @@ pub(crate) fn predict_table_reclaim(
     now_secs: i64,
 ) -> Result<ReclaimPrediction> {
     let paths: Vec<PathBuf> = inputs.iter().map(|i| i.data_path.clone()).collect();
-    crate::storage::sstable::statistics_reader::integrity::require_checked_statistics(&paths)?;
+    let all_inputs = InputStats::from_generations(
+        inputs
+            .iter()
+            .map(|i| (i.data_path.clone(), i.resolved.clone()))
+            .collect(),
+    );
+    all_inputs.require_trusted()?;
     let drop_set = if gc_before_secs.is_some() {
-        fully_expired_sstables(&paths, &[], gc_before_secs)
+        fully_expired_sstables_in(&all_inputs, &InputStats::default(), gc_before_secs)
     } else {
         Vec::new()
     };
     let (merge_inputs, dropped) = split_merge_and_dropped(&paths, drop_set);
+    let merging = all_inputs.subset(&merge_inputs);
 
-    let mut effective = effective_compaction_schema(schema, &merge_inputs);
-    apply_udt_marshals_from_inputs(&mut effective, &merge_inputs, None)?;
+    let mut effective = effective_compaction_schema_in(schema, &merging);
+    apply_udt_marshals_from_inputs_in(&mut effective, &merging, None)?;
     let merger = KWayMerger::new_with_gc_and_registry(
         merge_inputs.clone(),
         &effective,

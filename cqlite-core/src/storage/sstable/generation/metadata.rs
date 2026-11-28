@@ -20,6 +20,9 @@ use std::sync::{Arc, OnceLock};
 use super::model::{Condition, Generation};
 use crate::error::{Error, Result};
 use crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback_detailed;
+use crate::parser::repair_metadata::{
+    parse_repair_metadata, parse_stats_extras, RepairMetadata, StatsExtras,
+};
 use crate::parser::statistics::SSTableStatistics;
 use crate::storage::sstable::statistics_reader::integrity;
 use crate::storage::sstable::version_gate::{
@@ -39,6 +42,12 @@ pub(super) type MetadataCell = Arc<OnceLock<std::result::Result<Loaded, Metadata
 #[derive(Debug, Clone)]
 pub(super) struct Loaded {
     stats: Arc<SSTableStatistics>,
+    /// The repair fields (`repairedAt`, `pendingRepair`, `isTransient`) decoded from the same
+    /// bytes with the descriptor's gates (compaction's repair-state classification, #4626).
+    repair: std::result::Result<Arc<RepairMetadata>, String>,
+    /// The STATS-extras histograms decoded from the same bytes; compaction's baseline seeding
+    /// reads the tombstone-drop-time histogram as its authoritative "has a tombstone" signal.
+    extras: std::result::Result<Arc<StatsExtras>, String>,
     #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
     facts: std::result::Result<Arc<StatisticsFacts>, String>,
     /// The `SerializationHeader.EncodingStats` triple `(minTimestamp, minLocalDeletionTime,
@@ -167,6 +176,33 @@ impl Generation {
             .clone()
     }
 
+    /// The repair fields of the trusted `Statistics.db`, from the same single read (G11). A decode
+    /// failure is `Corrupt`, naming the file.
+    pub(crate) fn repair_metadata(
+        &self,
+    ) -> std::result::Result<Arc<RepairMetadata>, MetadataFailure> {
+        self.loaded_with(&read_checked)?
+            .repair
+            .map_err(|detail| self.corrupt_decode(detail))
+    }
+
+    /// The STATS-extras histograms of the trusted `Statistics.db`, from the same single read
+    /// (G11). A decode failure is `Corrupt`, naming the file.
+    pub(crate) fn stats_extras(&self) -> std::result::Result<Arc<StatsExtras>, MetadataFailure> {
+        self.loaded_with(&read_checked)?
+            .extras
+            .map_err(|detail| self.corrupt_decode(detail))
+    }
+
+    fn corrupt_decode(&self, detail: String) -> MetadataFailure {
+        MetadataFailure::Corrupt {
+            path: self
+                .directory
+                .join(format!("{}-{STATISTICS_COMPONENT}", self.base_name())),
+            detail,
+        }
+    }
+
     /// The STATS fields `diagnose` reports beyond the typed value, from the same single read
     /// (G11, GD9). A decode failure is `Corrupt`, naming the file.
     #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
@@ -250,6 +286,12 @@ impl Generation {
             detail: e.to_string(),
         })?;
         let parsed = parse_statistics_with_fallback_detailed(&bytes, Some(&gates)).map(|(_, s)| s);
+        let repair = parse_repair_metadata(&bytes, Some(&gates))
+            .map(Arc::new)
+            .map_err(|e| e.to_string());
+        let extras = parse_stats_extras(&bytes, Some(&gates))
+            .map(Arc::new)
+            .map_err(|e| e.to_string());
         // The facts are decoded from the same buffer; it is dropped when this function returns.
         #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
         let facts = decode_facts(&bytes, &gates).map(Arc::new);
@@ -259,6 +301,8 @@ impl Generation {
         match parsed {
             Ok(stats) => Ok(Loaded {
                 stats: Arc::new(stats),
+                repair,
+                extras,
                 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
                 facts,
                 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]

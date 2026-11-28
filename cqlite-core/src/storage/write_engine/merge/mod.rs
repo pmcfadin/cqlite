@@ -91,9 +91,12 @@ use std::cmp::{Ordering, Reverse};
 #[cfg(feature = "write-support")]
 use std::collections::{BinaryHeap, VecDeque};
 #[cfg(feature = "write-support")]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 #[cfg(feature = "write-support")]
 use std::time::{Duration, Instant};
+
+mod input_stats;
+pub(crate) use input_stats::InputStats;
 
 mod model;
 #[cfg(feature = "write-support")]
@@ -160,6 +163,7 @@ mod from_readers;
 pub(crate) mod fully_expired;
 #[cfg(feature = "write-support")]
 pub use fully_expired::fully_expired_sstables;
+pub(crate) use fully_expired::fully_expired_sstables_in;
 #[cfg(feature = "write-support")]
 pub(crate) use fully_expired::{reclaim_dropped_whole, split_merge_and_dropped};
 
@@ -168,6 +172,7 @@ pub(crate) use fully_expired::{reclaim_dropped_whole, split_merge_and_dropped};
 /// and either returns the shared state to preserve or rejects a mixed-state set.
 #[cfg(feature = "write-support")]
 pub mod repair_state;
+pub(crate) use repair_state::classify_inputs_in;
 #[cfg(feature = "write-support")]
 pub use repair_state::{classify_inputs, RepairState};
 
@@ -607,22 +612,6 @@ pub struct CompactReport {
     pub stats: MergeStats,
 }
 
-/// Derive the sibling `Statistics.db` path for an SSTable `Data.db` path.
-///
-/// SSTable components share a `nb-<gen>-big-<Component>.db` stem, so the
-/// `Statistics.db` sibling is the `Data.db` filename with `Data.db` →
-/// `Statistics.db`, joined back onto the same directory. Falls back to the input
-/// path's own location when it has no parent. Shared by every Statistics.db
-/// reader in this module (`compute_baseline_min`, `compute_max_purgeable_timestamp`,
-/// the UDT-eligibility and effective-schema scans) so the component-naming
-/// convention lives in one place.
-#[cfg(feature = "write-support")]
-fn stats_path_for(data_path: &Path) -> PathBuf {
-    let filename = data_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let stats_filename = filename.replace("Data.db", "Statistics.db");
-    data_path.parent().unwrap_or(data_path).join(stats_filename)
-}
-
 /// Compute output encoding baselines (min timestamp / local-deletion-time / TTL)
 /// from the input SSTables' `Statistics.db` files (two-pass compaction, issue #729).
 ///
@@ -635,31 +624,28 @@ fn stats_path_for(data_path: &Path) -> PathBuf {
 /// and policy-driven compaction paths seed baselines identically.
 #[cfg(feature = "write-support")]
 pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
+    compute_baseline_min_in(&InputStats::resolve(input_paths))
+}
+
+/// [`compute_baseline_min`] over inputs already resolved to generations, so the run reads each
+/// `Statistics.db` once through the trusted-metadata accessor (G11, GD9.1).
+#[cfg(feature = "write-support")]
+pub(crate) fn compute_baseline_min_in(inputs: &InputStats) -> (i64, i32, i32) {
     let mut baseline_min_ts = i64::MAX;
     let mut baseline_min_ldt = i32::MAX;
     let mut baseline_min_ttl = i32::MAX;
-    for data_path in input_paths {
-        // Derive Statistics.db path from Data.db path
-        let stats_path = stats_path_for(data_path);
-        if !stats_path.exists() {
-            continue;
-        }
-        let stats_bytes = match std::fs::read(&stats_path) {
-            Ok(b) => b,
-            Err(e) => {
+    for input in inputs.iter() {
+        let stats_path = input.path();
+        match input.statistics() {
+            Err(u) if u.is_absent() => continue,
+            Err(u) => {
                 tracing::warn!(
-                    "Could not read Statistics.db {:?} for baseline pre-seeding: {}",
+                    "Could not read Statistics.db for {:?} for baseline pre-seeding: {}",
                     stats_path,
-                    e
+                    u
                 );
-                continue;
             }
-        };
-        match crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
-            &stats_bytes,
-            None,
-        ) {
-            Ok((_, sstable_stats)) => {
+            Ok(sstable_stats) => {
                 let ts_stats = &sstable_stats.timestamp_stats;
                 baseline_min_ts = baseline_min_ts.min(ts_stats.min_timestamp);
                 // Local-deletion-time baseline seeding (#853/#886 Finding 2; sentinel
@@ -714,21 +700,20 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
                 //     or `DELETION_TIME_EPOCH`) → INCLUDE.
                 //   * `Err` (unparseable extras) → cannot prove live-only → INCLUDE.
                 let ldt_bits = ts_stats.min_deletion_time as u32 as i32;
-                let has_tombstone =
-                    match crate::parser::repair_metadata::parse_stats_extras(&stats_bytes, None) {
-                        Ok(extras) => !extras.tombstone_drop_times.is_empty(),
-                        Err(e) => {
-                            // Unparseable extras: stay conservative and INCLUDE (do NOT skip
-                            // a possibly-real LDT baseline). `true` forces the `.min()` below.
-                            tracing::debug!(
-                                "STATS-extras decode failed for {:?} during baseline seeding; \
+                let has_tombstone = match input.stats_extras() {
+                    Ok(extras) => !extras.tombstone_drop_times.is_empty(),
+                    Err(e) => {
+                        // Unparseable extras: stay conservative and INCLUDE (do NOT skip
+                        // a possibly-real LDT baseline). `true` forces the `.min()` below.
+                        tracing::debug!(
+                            "STATS-extras decode failed for {:?} during baseline seeding; \
                              conservatively including its LDT baseline: {:?}",
-                                stats_path,
-                                e
-                            );
-                            true
-                        }
-                    };
+                            stats_path,
+                            e
+                        );
+                        true
+                    }
+                };
                 if has_tombstone {
                     baseline_min_ldt = baseline_min_ldt.min(ldt_bits);
                 }
@@ -737,13 +722,6 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
                         baseline_min_ttl = baseline_min_ttl.min(min_ttl as i32);
                     }
                 }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Could not parse Statistics.db {:?} for baseline pre-seeding: {:?}",
-                    stats_path,
-                    e
-                );
             }
         }
     }
@@ -775,25 +753,13 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
 /// sentinel — so that case does not reach this guard.)
 #[cfg(feature = "write-support")]
 pub fn all_input_stats_readable(input_paths: &[PathBuf]) -> bool {
-    for data_path in input_paths {
-        let stats_path = stats_path_for(data_path);
-        if !stats_path.exists() {
-            return false;
-        }
-        let stats_bytes = match std::fs::read(&stats_path) {
-            Ok(b) => b,
-            Err(_) => return false,
-        };
-        if crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
-            &stats_bytes,
-            None,
-        )
-        .is_err()
-        {
-            return false;
-        }
-    }
-    true
+    all_input_stats_readable_in(&InputStats::resolve(input_paths))
+}
+
+/// [`all_input_stats_readable`] over inputs already resolved to generations (G11).
+#[cfg(feature = "write-support")]
+pub(crate) fn all_input_stats_readable_in(inputs: &InputStats) -> bool {
+    inputs.iter().all(|input| input.statistics().is_ok())
 }
 
 /// Expiry-aware LOWER bound for the compaction output's `min_local_deletion_time`
@@ -819,29 +785,21 @@ pub fn all_input_stats_readable(input_paths: &[PathBuf]) -> bool {
 /// metadata-only conservatism — a lower min never wrongly purges); no active
 /// byte-parity golden exists for compaction TTL-expiry output (blocked on #1538).
 /// No-heuristics: derived solely from authoritative Statistics.db.
-pub(crate) fn compute_expiry_ttl_ldt_floor(input_paths: &[PathBuf]) -> Option<i32> {
+pub(crate) fn compute_expiry_ttl_ldt_floor_in(inputs: &InputStats) -> Option<i32> {
     let mut floor: Option<i32> = None;
-    for data_path in input_paths {
-        let stats_path = stats_path_for(data_path);
-        if !stats_path.exists() {
-            continue;
-        }
-        let stats_bytes = match std::fs::read(&stats_path) {
-            Ok(b) => b,
-            Err(e) => {
+    for input in inputs.iter() {
+        let sstable_stats = match input.statistics() {
+            Ok(s) => s,
+            Err(u) if u.is_absent() => continue,
+            Err(u) => {
                 tracing::warn!(
-                    "Could not read Statistics.db {:?} for expiry-TTL LDT floor: {}",
-                    stats_path,
-                    e
+                    "Could not read Statistics.db for {:?} for expiry-TTL LDT floor: {}",
+                    input.path(),
+                    u
                 );
                 continue;
             }
         };
-        if let Ok((_, sstable_stats)) =
-            crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
-                &stats_bytes,
-                None,
-            )
         {
             let ts_stats = &sstable_stats.timestamp_stats;
             // Authoritative "has expiring cells" signal: a present, positive
@@ -900,39 +858,32 @@ pub fn compute_max_purgeable_timestamp(outside_paths: &[PathBuf]) -> Option<i64>
         return None;
     }
 
+    compute_max_purgeable_timestamp_in(&InputStats::resolve(outside_paths))
+}
+
+/// [`compute_max_purgeable_timestamp`] over outside SSTables already resolved to generations (G11).
+#[cfg(feature = "write-support")]
+pub(crate) fn compute_max_purgeable_timestamp_in(outside: &InputStats) -> Option<i64> {
+    if outside.iter().next().is_none() {
+        return None;
+    }
     let mut min_ts = i64::MAX;
-    for data_path in outside_paths {
-        let stats_path = stats_path_for(data_path);
+    for input in outside.iter() {
         // Any outside SSTable we cannot read/parse leaves the bound UNKNOWN: we
         // can no longer prove a tombstone predates its data, so disable
         // overlap-aware purging entirely (conservative — never resurrect data).
-        if !stats_path.exists() {
-            return None;
-        }
-        let stats_bytes = match fully_expired::read_checked_stats(&stats_path) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(
-                    "Could not read Statistics.db {:?} for max-purgeable bound: {}",
-                    stats_path,
-                    e
-                );
-                return None;
-            }
-        };
-        match crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
-            &stats_bytes,
-            None,
-        ) {
-            Ok((_, sstable_stats)) => {
+        match input.statistics() {
+            Ok(sstable_stats) => {
                 min_ts = min_ts.min(sstable_stats.timestamp_stats.min_timestamp);
             }
-            Err(e) => {
-                tracing::warn!(
-                    "Could not parse Statistics.db {:?} for max-purgeable bound: {:?}",
-                    stats_path,
-                    e
-                );
+            Err(u) => {
+                if !u.is_absent() {
+                    tracing::warn!(
+                        "Could not read Statistics.db for {:?} for max-purgeable bound: {}",
+                        input.path(),
+                        u
+                    );
+                }
                 return None;
             }
         }
@@ -1005,6 +956,13 @@ pub struct UdtNormalizationPlan {
 /// Conservative: if any input's header is missing or unparseable, returns an
 /// empty plan (normalize nothing), since the inputs' forms cannot be confirmed.
 pub fn udt_columns_eligible_for_normalization(input_paths: &[PathBuf]) -> UdtNormalizationPlan {
+    udt_columns_eligible_for_normalization_in(&InputStats::resolve(input_paths))
+}
+
+/// [`udt_columns_eligible_for_normalization`] over inputs already resolved to generations (G11).
+pub(crate) fn udt_columns_eligible_for_normalization_in(
+    inputs: &InputStats,
+) -> UdtNormalizationPlan {
     use std::collections::{HashMap, HashSet};
     // A column header is "UDT-bearing" when its marshal mentions `UserType(`
     // ANYWHERE — whether a bare top-level `UserType(...)` (a multicell complex
@@ -1021,16 +979,9 @@ pub fn udt_columns_eligible_for_normalization(input_paths: &[PathBuf]) -> UdtNor
     let mut usertype_marshals: HashMap<String, HashSet<String>> = HashMap::new();
     // columns declared as a non-UDT-bearing (plain simple / non-UDT) form
     let mut vetoed: HashSet<String> = HashSet::new();
-    for data_path in input_paths {
-        let stats_path = stats_path_for(data_path);
-        let Ok(stats_bytes) = std::fs::read(&stats_path) else {
-            return UdtNormalizationPlan::default();
-        };
-        match crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
-            &stats_bytes,
-            None,
-        ) {
-            Ok((_, sstable_stats)) => {
+    for input in inputs.iter() {
+        match input.statistics() {
+            Ok(sstable_stats) => {
                 for c in &sstable_stats.serialization_header_columns {
                     if c.column_type.to_lowercase().contains(USERTYPE_MARKER) {
                         usertype_marshals
@@ -1075,7 +1026,16 @@ pub(crate) fn apply_udt_marshals_from_inputs(
     input_paths: &[PathBuf],
     registry: Option<&crate::schema::UdtRegistry>,
 ) -> Result<()> {
-    let plan = udt_columns_eligible_for_normalization(input_paths);
+    apply_udt_marshals_from_inputs_in(schema, &InputStats::resolve(input_paths), registry)
+}
+
+/// [`apply_udt_marshals_from_inputs`] over inputs already resolved to generations (G11).
+pub(crate) fn apply_udt_marshals_from_inputs_in(
+    schema: &mut TableSchema,
+    inputs: &InputStats,
+    registry: Option<&crate::schema::UdtRegistry>,
+) -> Result<()> {
+    let plan = udt_columns_eligible_for_normalization_in(inputs);
     if !plan.conflicts.is_empty() {
         let mut cols: Vec<&String> = plan.conflicts.iter().collect();
         cols.sort();
@@ -1116,6 +1076,14 @@ pub(crate) fn apply_udt_marshals_from_inputs(
 }
 
 pub fn effective_compaction_schema(schema: &TableSchema, input_paths: &[PathBuf]) -> TableSchema {
+    effective_compaction_schema_in(schema, &InputStats::resolve(input_paths))
+}
+
+/// [`effective_compaction_schema`] over inputs already resolved to generations (G11).
+pub(crate) fn effective_compaction_schema_in(
+    schema: &TableSchema,
+    inputs: &InputStats,
+) -> TableSchema {
     use std::collections::HashSet;
 
     // Names already known to the current schema (regular + static columns and
@@ -1133,27 +1101,10 @@ pub fn effective_compaction_schema(schema: &TableSchema, input_paths: &[PathBuf]
     let mut added: Vec<(String, String)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    for data_path in input_paths {
-        let stats_path = stats_path_for(data_path);
-        if !stats_path.exists() {
-            continue;
-        }
-        let stats_bytes = match std::fs::read(&stats_path) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(
-                    "effective_compaction_schema: cannot read Statistics.db {:?}: {}",
-                    stats_path,
-                    e
-                );
-                continue;
-            }
-        };
-        match crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
-            &stats_bytes,
-            None,
-        ) {
-            Ok((_, sstable_stats)) => {
+    for input in inputs.iter() {
+        match input.statistics() {
+            Err(u) if u.is_absent() => continue,
+            Ok(sstable_stats) => {
                 for col in &sstable_stats.serialization_header_columns {
                     if col.is_static && !known.contains(&col.name) && seen.insert(col.name.clone())
                     {
@@ -1161,11 +1112,11 @@ pub fn effective_compaction_schema(schema: &TableSchema, input_paths: &[PathBuf]
                     }
                 }
             }
-            Err(e) => {
+            Err(u) => {
                 tracing::warn!(
-                    "effective_compaction_schema: cannot parse Statistics.db {:?}: {:?}",
-                    stats_path,
-                    e
+                    "effective_compaction_schema: cannot read Statistics.db for {:?}: {}",
+                    input.path(),
+                    u
                 );
             }
         }
@@ -1382,15 +1333,22 @@ pub async fn compact_sstables_with_registry(
     // the merger's input list BEFORE building the merger, so dropped SSTables are
     // never read/decoded (the perf win); their components are deleted only after
     // the output publishes. `split_merge_and_dropped` handles the all-dropped guard.
-    fully_expired::require_checked_inputs(&input_paths)?; // #4612: damaged Statistics.db
+    // Each input's Statistics.db is read once through the generation module (G11, GD9.1).
+    let all_inputs = InputStats::resolve(&input_paths);
+    all_inputs.require_trusted()?; // #4612: damaged Statistics.db
     let drop_set: Vec<PathBuf> = if purge_safe {
-        fully_expired_sstables(&input_paths, &[], gc_before_secs)
+        fully_expired::fully_expired_sstables_in(
+            &all_inputs,
+            &InputStats::default(),
+            gc_before_secs,
+        )
     } else {
         Vec::new()
     };
     let (merge_inputs, dropped_whole) = split_merge_and_dropped(&input_paths, drop_set);
     // Merge only the drop-filtered `merge_inputs`; dropped ones are reclaimed after publish.
     let input_paths = merge_inputs;
+    let inputs = all_inputs.subset(&input_paths);
 
     // #850: read static-row presence from the input SSTable headers. If a static
     // column is absent from the current schema but an input SSTable still declares
@@ -1401,7 +1359,7 @@ pub async fn compact_sstables_with_registry(
     // #847/#904 dropped-column flow below: the effective schema keeps `schema`'s
     // `dropped_columns` map, so the retained-dropped pre-pass and write-schema
     // derivation operate on it unchanged.
-    let mut effective_schema = effective_compaction_schema(schema, &input_paths);
+    let mut effective_schema = effective_compaction_schema_in(schema, &inputs);
     // #929: copy each UDT column's exact UserType(...) marshal from the input
     // headers onto the EFFECTIVE (decode) schema so the compaction reader treats
     // it as complex (is_complex_column) and round-trips the per-field UDT cells
@@ -1412,7 +1370,7 @@ pub async fn compact_sstables_with_registry(
     // `for_compaction_output` (clones columns). When `udt_registry` is supplied,
     // a UDT column absent from every input (schema evolution) is registry-
     // normalized so the output header is not a bare/BytesType column.
-    apply_udt_marshals_from_inputs(&mut effective_schema, &input_paths, udt_registry)?;
+    apply_udt_marshals_from_inputs_in(&mut effective_schema, &inputs, udt_registry)?;
 
     // Decode with `effective_schema` (retains dropped columns so their input cells
     // parse and can be purged), but WRITE with a post-drop schema: fully-purged
@@ -1461,7 +1419,7 @@ pub async fn compact_sstables_with_registry(
     // Repair-state preservation + mixed-state rejection (issue #1021): reject a
     // mixed repaired/unrepaired/pending-repair input set (Cassandra never mixes
     // them in one compaction) and otherwise carry the shared state forward.
-    let repair_state = classify_inputs(&input_paths)?;
+    let repair_state = repair_state::classify_inputs_in(&inputs)?;
 
     let mut writer = crate::storage::sstable::writer::SSTableWriter::new(
         output_dir.to_path_buf(),
@@ -1480,13 +1438,13 @@ pub async fn compact_sstables_with_registry(
     // Two-pass compaction (issue #729): seed the output's encoding baselines from
     // the inputs' Statistics.db before writing any partition.
     let (baseline_min_ts, mut baseline_min_ldt, baseline_min_ttl) =
-        compute_baseline_min(&input_paths);
+        compute_baseline_min_in(&inputs);
     // Issue #1537: when expiry is active, an expired expiring cell converts to a
     // creation-time (`ldt - ttl`) tombstone whose LDT is BELOW the input-derived
     // baseline; lower the LDT baseline to a provably-safe floor so the DataWriter's
     // unsigned LDT-delta never underflows. No-op when no input carries expiring cells.
     if now_secs.is_some() {
-        if let Some(floor) = compute_expiry_ttl_ldt_floor(&input_paths) {
+        if let Some(floor) = compute_expiry_ttl_ldt_floor_in(&inputs) {
             baseline_min_ldt = baseline_min_ldt.min(floor);
         }
     }

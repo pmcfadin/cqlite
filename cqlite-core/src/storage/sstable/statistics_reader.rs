@@ -94,6 +94,20 @@ impl StatisticsReader {
         })
     }
 
+    /// A reader over statistics the generation module's accessor already read, checked and
+    /// parsed (G11); it opens no file.
+    pub(crate) fn from_trusted(
+        path: &Path,
+        statistics: SSTableStatistics,
+        platform: Arc<Platform>,
+    ) -> Self {
+        Self {
+            file_path: path.to_path_buf(),
+            statistics,
+            platform,
+        }
+    }
+
     /// Get the raw statistics data
     pub fn statistics(&self) -> &SSTableStatistics {
         &self.statistics

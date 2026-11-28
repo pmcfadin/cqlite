@@ -236,6 +236,7 @@ impl SSTableReader {
         platform: Arc<Platform>,
         chunk_cache: Arc<crate::storage::cache::DecompressedChunkCache>,
         cancel: crate::storage::scan_cancel::ScanCancel,
+        trusted_statistics: Option<Arc<crate::parser::statistics::SSTableStatistics>>,
     ) -> Result<Self> {
         // #1696 (roborev r2 F4): validate the direct-I/O fraction FIRST, before
         // any `tokio::fs` call. It was validated at its point of use — after
@@ -549,7 +550,7 @@ impl SSTableReader {
                 component_loading::IndexLoadOutcome::Absent => (None, false),
                 component_loading::IndexLoadOutcome::PresentButUnloadable => (None, true),
             };
-        let statistics_reader = Self::load_statistics_reader(path, &platform)
+        let statistics_reader = Self::load_statistics_reader(path, &platform, trusted_statistics)
             .instrument(tracing::debug_span!("sstable.reader.open.load_statistics"))
             .await?;
 
