@@ -404,6 +404,53 @@ fn below_floor_generation_is_listed_and_refuses_metadata() {
     assert!(text.contains("ma") && text.contains("na"), "{text}");
 }
 
+/// G9.1 core-listing: no component of a below-floor generation is opened. Every `ma-1-big-*`
+/// file is a dangling symlink, so any `open` would be an I/O error; the listing must still classify it.
+#[cfg(unix)]
+#[test]
+fn below_floor_listing_opens_no_component() {
+    // Every component is a DANGLING symlink: opening any of them fails with ENOENT for every
+    // user, root included (mode 000 does not stop root), so an `UnsupportedVersion` result with
+    // no I/O error proves the listing opened none of them.
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("missing-target");
+    for c in [
+        "Data.db",
+        "Statistics.db",
+        "TOC.txt",
+        "Digest.crc32",
+        "Index.db",
+    ] {
+        let p = tmp.path().join(format!("ma-1-big-{c}"));
+        std::os::unix::fs::symlink(&missing, &p).unwrap();
+        assert!(
+            std::fs::File::open(&p).is_err(),
+            "a dangling link must not open"
+        );
+    }
+    let listing = list_generations(tmp.path(), &Scope::Live, TocPolicy::Accept)
+        .expect("listing an unopenable below-floor generation must not be an I/O error");
+    assert_eq!(listing.live.len(), 1);
+    assert_eq!(
+        listing.live[0].conditions(),
+        &[Condition::UnsupportedVersion]
+    );
+    let failure = listing.live[0].trusted_metadata().unwrap_err();
+    assert_eq!(failure.condition(), Condition::UnsupportedVersion);
+}
+
+/// G10.2: the listing takes a directory, a Scope and a TocPolicy and nothing else (no closure, no
+/// format or version filter). Binding to this exact fn-pointer type breaks the build if a
+/// parameter is added or changed.
+#[test]
+fn listing_signature_has_no_filter_parameter() {
+    let f: fn(&std::path::Path, &Scope, TocPolicy) -> Result<Listing, GenerationError> =
+        list_generations;
+    let tmp = tempfile::tempdir().unwrap();
+    let listing = f(tmp.path(), &Scope::Live, TocPolicy::Accept).expect("empty dir lists");
+    assert!(listing.live.is_empty());
+}
+
 /// G11.1: a second request does not touch the disk.
 #[test]
 fn trusted_metadata_value_is_cached() {

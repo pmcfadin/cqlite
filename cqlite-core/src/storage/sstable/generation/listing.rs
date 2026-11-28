@@ -217,11 +217,13 @@ fn build_generation(
         conditions.insert(Condition::UnsupportedVersion);
     }
     // G4: a missing or zero-length Data.db is Cassandra's own "all components are orphaned"
-    // (`SortedTableScrubber.java:165-180`).
+    // (`SortedTableScrubber.java:165-180`). The zero-length test needs a `stat`, so it is skipped
+    // for a below-floor generation: G9 allows no file access for one (it is refused regardless).
     match components.iter().find(|c| c.name == DATA_COMPONENT) {
         None => {
             conditions.insert(Condition::Orphan);
         }
+        Some(_) if below_floor.is_some() => {}
         Some(data) => match std::fs::metadata(&data.path) {
             Ok(m) if m.len() == 0 => {
                 conditions.insert(Condition::Orphan);
